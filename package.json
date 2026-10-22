@@ -1,0 +1,26 @@
+{
+  "name": "ao-pi",
+  "version": "0.1.0",
+  "description": "Pi / PiG extension for Agent Office: /office connects through OAuth, adds the Office MCP tools and reports working/idle status",
+  "type": "module",
+  "main": "index.ts",
+  "exports": "./index.ts",
+  "files": [
+    "index.ts",
+    "lib/office.ts",
+    "lib/token.mts",
+    "poll.ts"
+  ],
+  "repository": "github:az-iar/ao-pi",
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test test/*.test.mts"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@types/node": "^24.6.0",
+    "typescript": "^5.8.2"
+  }
+}
