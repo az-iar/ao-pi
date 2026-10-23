@@ -141,7 +141,7 @@ test("a new todo task is claimed, run as a worker in its worktree, and its dispa
   assert.deepEqual(run.argv.slice(0, 1), ["--print"])
   assert.match(run.argv[1], /^Agent Office task task-new\./)
   assert.ok(run.argv[1].includes(`git worktree ${worktree} on branch office/${short}`))
-  assert.match(run.argv[1], /Before you start any work, send Azri a short note/)
+  assert.match(run.argv[1], /Before you start any work, post one short comment on the task with post_comment/)
   const update = office.calls.find((c) => c.body?.params?.name === "update_task")
   assert.equal(update?.body.params.arguments.task_id, "task-new")
   assert.equal(update?.body.params.arguments.status, "in_progress")
