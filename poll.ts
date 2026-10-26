@@ -19,6 +19,7 @@ import { spawn, spawnSync } from "node:child_process"
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, resolve } from "node:path"
 import { parseArgs } from "node:util"
+import { fileURLToPath } from "node:url"
 import {
   acquireDispatch,
   addWorktree,
@@ -41,10 +42,13 @@ import {
 
 const PI_BIN = process.env.AGENT_OFFICE_PI_BIN || "pig"
 const INBOX_TIMEOUT_MS = 60 * 60_000
+const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url))
 
 type Seen = { messages: string[]; assigned: string[]; unclaimed: string[] }
 
-const log = (line: string) => process.stderr.write(`[agent-office poll] ${line}\n`)
+const log = (line: string) => {
+  process.stderr.write(`[agent-office poll] ${line}\n`)
+}
 const list = (value: unknown): any[] => (Array.isArray(value) ? value : [])
 
 // The repo root a worktree belongs to, as the canonical project path.
@@ -97,27 +101,54 @@ function acquireRunLock(path: string): (() => void) | undefined {
 }
 
 // `pig --print` is Pi's non-interactive mode. The prompt is one argv entry,
-// never a shell string. The worker runs with its worktree as cwd.
-function runPi(directory: string, prompt: string, timeoutMs: number): Promise<number | null> {
-  return new Promise((done, fail) => {
-    const child = spawn(PI_BIN, ["--print", prompt], { cwd: directory, stdio: ["ignore", "ignore", "inherit"] })
-    const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs)
+// never a shell string. The worker runs with its worktree as cwd. `-e` makes
+// the extension load even when it is installed with `-e` only, and the child
+// flag keeps that extension from polling, dispatching or reporting status.
+function runPi(directory: string, prompt: string, timeoutMs: number): { started: Promise<void>; done: Promise<number | null> } {
+  let child: ReturnType<typeof spawn>
+  try {
+    child = spawn(PI_BIN, ["-e", EXTENSION_DIR, "--print", prompt], {
+      cwd: directory,
+      env: { ...process.env, AGENT_OFFICE_CHILD: "1" },
+      stdio: ["ignore", "ignore", "inherit"],
+    })
+  } catch (err) {
+    return { started: Promise.reject(err), done: Promise.resolve(null) }
+  }
+  let startedResolve!: () => void
+  let startedReject!: (err: Error) => void
+  const started = new Promise<void>((resolve, reject) => {
+    startedResolve = resolve
+    startedReject = reject
+  })
+  const done = new Promise<number | null>((resolve) => {
+    let killTimer: ReturnType<typeof setTimeout> | undefined
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM")
+      killTimer = setTimeout(() => child.kill("SIGKILL"), 5_000)
+      killTimer.unref()
+    }, timeoutMs)
+    child.once("spawn", () => startedResolve())
     child.on("error", (err) => {
       clearTimeout(timer)
-      fail(err)
+      clearTimeout(killTimer)
+      startedReject(err)
+      resolve(null)
     })
     child.on("close", (code) => {
       clearTimeout(timer)
-      done(code)
+      clearTimeout(killTimer)
+      resolve(code)
     })
   })
+  return { started, done }
 }
 
 async function main(): Promise<number> {
   const { values } = parseArgs({ options: { dir: { type: "string" }, "dry-run": { type: "boolean" } } })
   const directory = resolve(values.dir ?? process.cwd())
   const dryRun = Boolean(values["dry-run"])
-  const autoDispatch = !["off", "false"].includes((process.env.AGENT_OFFICE_AUTODISPATCH ?? "on").toLowerCase())
+  const autoDispatch = !["off", "false"].includes((process.env.AGENT_OFFICE_AUTODISPATCH ?? "on").trim().toLowerCase())
 
   const resolved = resolveCredentials(directory, canonicalRoot(directory))
   const { bearer } = createBearer(() => resolved.credentialsFile, resolved.credentials)
@@ -150,8 +181,10 @@ async function main(): Promise<number> {
     const freshUnclaimed = saved ? unclaimed.filter((item) => !saved.unclaimed.includes(itemKey(item, "task"))) : []
     log(`@${agent}: ${freshMessages.length} new message(s), ${freshAssigned.length} new assigned task(s), ${freshUnclaimed.length} new unclaimed task(s)${saved ? "" : " (task baseline)"}`)
 
-    // A task the cap holds back stays unseen, so the next run tries it again.
+    // A task the cap holds back or whose dispatch failed stays unseen, so the
+    // next run tries it again.
     const retry = new Set<string>()
+    const failed = new Set<string>()
     const todo = freshAssigned.filter((item) => String(item?.status ?? "todo").toLowerCase() === "todo")
     if (todo.length > 0 && !autoDispatch) log(`auto-dispatch is off; not dispatching ${todo.length} task(s)`)
     for (const item of autoDispatch ? todo : []) {
@@ -169,21 +202,33 @@ async function main(): Promise<number> {
         log(`task ${id} is already dispatched`)
         continue
       }
-      runs.push(
-        (async () => {
-          try {
-            const detail = await call("get_task", { task_id: id }).catch(() => undefined)
-            await claimTask(call, id)
-            const { path, branch } = await addWorktree(canonicalRoot(directory), id)
-            log(`dispatching task ${id} to ${path}`)
-            log(`task ${id} run exited ${await runPi(path, supervisorPrompt(id, (detail as any)?.task ?? detail, path, branch), DISPATCH_STALE_MS)}`)
-          } catch (err) {
-            log(`could not dispatch task ${id}: ${String(err)}`)
-          } finally {
-            releaseDispatch(dispatchDir, id)
-          }
-        })(),
-      )
+      const key = itemKey(item, "task")
+      try {
+        const detail = await call("get_task", { task_id: id }).catch(() => undefined)
+        await claimTask(call, id)
+        const { path, branch } = await addWorktree(canonicalRoot(directory), id)
+        log(`dispatching task ${id} to ${path}`)
+        let job: ReturnType<typeof runPi>
+        try {
+          job = runPi(path, supervisorPrompt(id, (detail as any)?.task ?? detail, path, branch), DISPATCH_STALE_MS)
+          await job.started
+        } catch (err) {
+          failed.add(key)
+          releaseDispatch(dispatchDir, id)
+          log(`could not start ${PI_BIN} for task ${id}: ${String(err)}`)
+          continue
+        }
+        runs.push(
+          job.done
+            .then((code) => log(`task ${id} run exited ${code}`))
+            .finally(() => releaseDispatch(dispatchDir, id)),
+        )
+      } catch (err) {
+        // The worker never started, so leave the task unseen for the next run.
+        failed.add(key)
+        releaseDispatch(dispatchDir, id)
+        log(`could not dispatch task ${id}: ${String(err)}`)
+      }
     }
     if (retry.size > 0) log(`${retry.size} task(s) wait for a free dispatch slot`)
 
@@ -193,14 +238,18 @@ async function main(): Promise<number> {
       if (dryRun) {
         log(`would handle message(s) ${ids.join(", ")}`)
       } else if (!claimNotice(noticeDir, ids)) {
+        // Another Pi owns the batch. Leave the messages unseen: if that process
+        // dies, the claim expires and a later run retries them.
         log("another Pi is handling these messages")
-        for (const id of ids) handled.add(id)
       } else {
         log(`handling ${ids.length} message(s)`)
-        const code = await runPi(directory, inboxPrompt(freshMessages), INBOX_TIMEOUT_MS).catch((err) => {
-          log(`could not start ${PI_BIN}: ${String(err)}`)
-          return null
-        })
+        const job = runPi(directory, inboxPrompt(freshMessages), INBOX_TIMEOUT_MS)
+        const code = await job.started
+          .then(() => job.done)
+          .catch((err) => {
+            log(`could not start ${PI_BIN}: ${String(err)}`)
+            return null
+          })
         if (code === 0) {
           for (const id of ids) handled.add(id)
         } else {
@@ -213,7 +262,7 @@ async function main(): Promise<number> {
     if (!dryRun) {
       saveSeen(statePath, {
         messages: messages.map((item) => itemKey(item, "message")).filter((id) => seenMessages.has(id) || handled.has(id)),
-        assigned: assigned.map((item) => itemKey(item, "task")).filter((id) => !retry.has(id)),
+        assigned: assigned.map((item) => itemKey(item, "task")).filter((id) => !retry.has(id) && !failed.has(id)),
         unclaimed: unclaimed.map((item) => itemKey(item, "task")),
       })
     }

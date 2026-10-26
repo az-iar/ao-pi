@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { mkdtempSync } from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
@@ -64,6 +64,19 @@ test("a Pi in a task worktree knows it is on a task branch", async () => {
   const { path } = await addWorktree(repo, "task-1")
   assert.equal(onTaskBranch(repo), false)
   assert.equal(onTaskBranch(path), true)
+})
+
+test("a removed task worktree is recreated from its existing branch", async () => {
+  const repo = join(mkdtempSync(join(tmpdir(), "ao-retry-")), "repo")
+  execFileSync("git", ["init", "-q", repo])
+  execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"])
+  const first = await addWorktree(repo, "task-retry")
+  rmSync(first.path, { recursive: true, force: true })
+  execFileSync("git", ["-C", repo, "worktree", "prune"])
+  const second = await addWorktree(repo, "task-retry")
+  assert.equal(second.path, first.path)
+  assert.equal(second.branch, first.branch)
+  assert.equal(execFileSync("git", ["-C", second.path, "branch", "--show-current"], { encoding: "utf8" }).trim(), first.branch)
 })
 
 test("the cron line carries the workspace, PATH and the right runtime", () => {

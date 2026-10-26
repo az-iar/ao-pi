@@ -18,9 +18,12 @@
     "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test test/*.test.mts"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.85.1",
-    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@earendil-works/pi-ai": "^1.4.0",
+    "@earendil-works/pi-coding-agent": "^1.4.0",
     "@types/node": "^24.6.0",
     "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=22.18"
   }
 }

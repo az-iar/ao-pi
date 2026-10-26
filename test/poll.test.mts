@@ -1,15 +1,16 @@
 import assert from "node:assert/strict"
 import { execFileSync, spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { after, before, test } from "node:test"
 import { fileURLToPath } from "node:url"
 import { fakeOffice } from "./fake-office.mts"
 
 const office = fakeOffice()
 const pollScript = fileURLToPath(new URL("../poll.ts", import.meta.url))
+const extensionDir = dirname(pollScript)
 let url = ""
 
 before(async () => {
@@ -31,7 +32,7 @@ function workspace() {
   mkdirSync(join(root, "store"))
   writeFileSync(credentials, JSON.stringify({ office: url, client_id: "client-1", access_token: "access-poll", refresh_token: "refresh-poll", expires_at: Date.now() + 3_600_000 }))
   const stub = join(root, "pig")
-  writeFileSync(stub, `#!${process.execPath}\nrequire("fs").writeFileSync(require("path").join(${JSON.stringify(runs)}, String(Date.now()) + "-" + process.pid + ".json"), JSON.stringify({ cwd: process.cwd(), argv: process.argv.slice(2) }))\nprocess.exit(Number(process.env.STUB_EXIT ?? 0))\n`)
+  writeFileSync(stub, `#!${process.execPath}\nrequire("fs").writeFileSync(require("path").join(${JSON.stringify(runs)}, String(Date.now()) + "-" + process.pid + ".json"), JSON.stringify({ cwd: process.cwd(), argv: process.argv.slice(2), child: process.env.AGENT_OFFICE_CHILD }))\nprocess.exit(Number(process.env.STUB_EXIT ?? 0))\n`)
   chmodSync(stub, 0o755)
   const env: Record<string, string> = { ...(process.env as Record<string, string>), HOME: root, AGENT_OFFICE_URL: url, AGENT_OFFICE_PI_CREDENTIALS: credentials, AGENT_OFFICE_PI_BIN: stub }
   delete env.AGENT_OFFICE_TOKEN
@@ -43,7 +44,7 @@ function workspace() {
       child.stderr.on("data", (chunk) => (stderr += String(chunk)))
       child.on("close", (code) => resolve({ code, stderr }))
     })
-  const recorded = () => readdirSync(runs).sort().map((file) => JSON.parse(readFileSync(join(runs, file), "utf8")) as { cwd: string; argv: string[] })
+  const recorded = () => readdirSync(runs).sort().map((file) => JSON.parse(readFileSync(join(runs, file), "utf8")) as { cwd: string; argv: string[]; child?: string })
   const state = (kind: string) => join(root, "store", kind, "pi")
   return { dir, poll, recorded, state }
 }
@@ -76,8 +77,9 @@ test("first run handles unread mail but baselines tasks; a new message runs exac
   assert.ok(!toolCalls().includes("update_task"), "a pre-existing task is baseline")
   const [inbox] = ws.recorded()
   assert.equal(inbox.cwd, ws.dir)
-  assert.deepEqual(inbox.argv.slice(0, 1), ["--print"])
-  assert.match(inbox.argv[1], /^Agent Office inbox: 2 new message\(s\)/)
+  assert.deepEqual(inbox.argv.slice(0, 3), ["-e", extensionDir, "--print"])
+  assert.equal(inbox.child, "1", "headless children do not poll or report status")
+  assert.match(inbox.argv[3], /^Agent Office inbox: 2 new message\(s\)/)
 
   assert.equal((await ws.poll()).code, 0)
   assert.equal(ws.recorded().length, 1, "nothing new, nothing run")
@@ -86,7 +88,7 @@ test("first run handles unread mail but baselines tasks; a new message runs exac
   const third = await ws.poll()
   assert.equal(third.code, 0, third.stderr)
   assert.equal(ws.recorded().length, 2)
-  const prompt = ws.recorded()[1].argv[1]
+  const prompt = ws.recorded()[1].argv[3]
   assert.match(prompt, /^Agent Office inbox: 1 new message\(s\)/)
   assert.match(prompt, /message:message-new/)
   assert.doesNotMatch(prompt, /message-old-1|message-self/)
@@ -109,14 +111,18 @@ test("a notice claim held elsewhere prevents a run", async () => {
   reset()
   const ws = workspace()
   await ws.poll()
-  const { claimNotice } = await import("../lib/office.ts")
+  const { claimNotice, releaseNotice } = await import("../lib/office.ts")
   assert.ok(claimNotice(ws.state("notices"), ["message:message-held"]))
   office.state.unreadMessages = [...office.state.unreadMessages, { id: "message-held", from: "azri", subject: "Held" }]
   const held = await ws.poll()
   assert.match(held.stderr, /another Pi is handling these messages/)
   assert.equal(ws.recorded().length, 1)
   await ws.poll()
-  assert.equal(ws.recorded().length, 1, "a claimed batch is seen")
+  assert.equal(ws.recorded().length, 1, "the claim still blocks the batch")
+  releaseNotice(ws.state("notices"), ["message:message-held"])
+  const retried = await ws.poll()
+  assert.equal(retried.code, 0, retried.stderr)
+  assert.equal(ws.recorded().length, 2, "a failed claim is retried after the claim is released")
 })
 
 test("a new todo task is claimed, run as a worker in its worktree, and its dispatch lock released", async () => {
@@ -138,14 +144,52 @@ test("a new todo task is claimed, run as a worker in its worktree, and its dispa
   const worktree = `${ws.dir}-office-${short}`
   assert.equal(execFileSync("git", ["-C", worktree, "branch", "--show-current"], { encoding: "utf8" }).trim(), `office/${short}`)
   assert.equal(run.cwd, worktree)
-  assert.deepEqual(run.argv.slice(0, 1), ["--print"])
-  assert.match(run.argv[1], /^Agent Office task task-new\./)
-  assert.ok(run.argv[1].includes(`git worktree ${worktree} on branch office/${short}`))
-  assert.match(run.argv[1], /Before you start any work, post one short comment on the task with post_comment/)
+  assert.deepEqual(run.argv.slice(0, 3), ["-e", extensionDir, "--print"])
+  assert.equal(run.child, "1")
+  assert.match(run.argv[3], /^Agent Office task task-new\./)
+  assert.ok(run.argv[3].includes(`git worktree ${worktree} on branch office/${short}`))
+  assert.match(run.argv[3], /Before you start any work, post one short comment on the task with post_comment/)
   const update = office.calls.find((c) => c.body?.params?.name === "update_task")
   assert.equal(update?.body.params.arguments.task_id, "task-new")
   assert.equal(update?.body.params.arguments.status, "in_progress")
   assert.deepEqual(readdirSync(ws.state("dispatch")), [])
+})
+
+test("a failed dispatch stays unseen and retries after the obstruction is gone", async () => {
+  reset()
+  const ws = workspace()
+  await ws.poll()
+  office.calls.length = 0
+  office.state.openTasks = [...office.state.openTasks, { id: "task-retry", title: "Retry me", status: "todo" }]
+  const short = createHash("sha256").update("task-retry").digest("hex").slice(0, 8)
+  const worktree = `${ws.dir}-office-${short}`
+  mkdirSync(worktree)
+  const failed = await ws.poll()
+  assert.equal(failed.code, 0, failed.stderr)
+  assert.match(failed.stderr, /could not dispatch task task-retry/)
+  assert.equal(ws.recorded().length, 1, "no worker ran in the plain directory")
+
+  rmSync(worktree, { recursive: true, force: true })
+  const retried = await ws.poll()
+  assert.equal(retried.code, 0, retried.stderr)
+  assert.equal(ws.recorded().length, 2, "the task was not marked seen")
+  assert.equal(ws.recorded()[1].cwd, worktree)
+})
+
+test("a missing worker binary stays unseen and retries", async () => {
+  reset()
+  const ws = workspace()
+  await ws.poll()
+  office.calls.length = 0
+  office.state.openTasks = [...office.state.openTasks, { id: "task-no-bin", title: "No binary", status: "todo" }]
+  const failed = await ws.poll([], { AGENT_OFFICE_PI_BIN: "/definitely/missing/pig" })
+  assert.equal(failed.code, 0, failed.stderr)
+  assert.match(failed.stderr, /could not start .*task-no-bin/)
+  assert.equal(ws.recorded().length, 1, "no worker ran")
+
+  const retried = await ws.poll()
+  assert.equal(retried.code, 0, retried.stderr)
+  assert.equal(ws.recorded().length, 2, "the task was not marked seen")
 })
 
 test("--dry-run reports ids only, writes nothing and starts nothing", async () => {

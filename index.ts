@@ -3,10 +3,12 @@
 //   /office [name]     connects: OAuth in the browser, Azri approves, the token
 //                      is stored under the agent name, and the Office MCP tools
 //                      appear in Pi. The name pre-fills a new agent.
-//   while running      `working` while this Pi session streams, a heartbeat
-//                      every 90 s, `idle` once it settles; `blocked` is never
-//                      overridden. New assigned tasks go to a worker Pi in a
-//                      worktree, up to two tasks at a time.
+//   while running      `working` while this Pi session streams or a dispatched
+//                      worker runs, a heartbeat every 90 s, `idle` once both
+//                      settle; `idle` never overrides `blocked`. New assigned
+//                      tasks go to a worker Pi in a worktree, up to two tasks
+//                      at a time per Office agent. Headless children do not
+//                      poll, dispatch, or report status.
 //
 //   AGENT_OFFICE_URL                dashboard origin, default https://office.byma.tech
 //   AGENT_OFFICE_TOKEN              an agent API token instead of OAuth (optional)
@@ -23,7 +25,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "@earendil-works/pi-ai"
 import { spawn } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
-import { existsSync } from "node:fs"
+import { existsSync, unlinkSync } from "node:fs"
 import { createServer } from "node:http"
 import { hostname } from "node:os"
 import { basename, dirname, join, sep } from "node:path"
@@ -33,7 +35,6 @@ import {
   acquireDispatch,
   addWorktree,
   agentCredentialsPath,
-  agentPointerPath,
   agentStateDir,
   CREDENTIALS_OVERRIDE,
   claimNotice,
@@ -45,24 +46,26 @@ import {
   inboxPrompt,
   inHerdrWorktree,
   itemKey,
+  loadAgentPointer,
+  loadCredentials,
   MAX_DISPATCHES,
   OFFICE,
-  officeData,
   onTaskBranch,
   REFRESH_EARLY_MS,
   releaseDispatch,
   releaseNotice,
   resolveCredentials,
-  saveAgentPointer,
+  saveAgentPointers,
   saveCredentials,
-  summary,
   supervisorPrompt,
   taskID,
   tokenRequest,
   workspaceKey,
 } from "./lib/office.ts"
 
-const CALLBACK_BASE_PORT = Number(process.env.AGENT_OFFICE_CALLBACK_PORT ?? 41997)
+const configuredCallbackPort = Number(process.env.AGENT_OFFICE_CALLBACK_PORT ?? 41997)
+const CALLBACK_BASE_PORT =
+  Number.isInteger(configuredCallbackPort) && configuredCallbackPort >= 1 && configuredCallbackPort <= 65535 ? configuredCallbackPort : 41997
 const CALLBACK_TRIES = 20
 const HERE = dirname(fileURLToPath(import.meta.url))
 const TOKEN_SCRIPT = join(HERE, "lib", "token.mts")
@@ -75,7 +78,10 @@ const APPROVAL_TIMEOUT_MS = 5 * 60_000
 const DEFAULT_POLL_MS = 60_000
 const DISPATCH_STALE_MS = 6 * 60 * 60_000
 
-type PendingCallback = { resolve: (code: string) => void; reject: (err: Error) => void; close: () => void }
+type PendingCallback = { resolve: (code: string) => void; reject: (err: Error) => void; close: () => void; cancel: (err: Error) => void }
+
+const escapeHtml = (value: string) =>
+  value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] ?? char)
 
 // A pasted callback URL can finish an approval without the browser reaching
 // the loopback listener, which matters on remote machines and headless hosts.
@@ -105,11 +111,14 @@ function completeCallback(raw: string): { handled: boolean; ok: boolean; message
   return { handled: true, ok: true, message: "callback accepted; finishing the Office connection" }
 }
 
-function run(command: string, args: string[], cwd?: string, timeoutMs = 30_000): Promise<{ code: number | null; stdout: string; stderr: string }> {
+const MAX_CHILD_OUTPUT = 64_000
+function run(command: string, args: string[], cwd?: string, timeoutMs = 30_000, env: NodeJS.ProcessEnv = process.env): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] })
+    const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] })
     let stdout = ""
     let stderr = ""
+    const keep = (current: string, chunk: unknown) =>
+      current.length >= MAX_CHILD_OUTPUT ? current : current + String(chunk).slice(0, MAX_CHILD_OUTPUT - current.length)
     let timer: ReturnType<typeof setTimeout> | undefined
     if (timeoutMs > 0) {
       timer = setTimeout(() => {
@@ -118,8 +127,8 @@ function run(command: string, args: string[], cwd?: string, timeoutMs = 30_000):
       }, timeoutMs)
       timer.unref()
     }
-    child.stdout.on("data", (chunk) => (stdout += String(chunk)))
-    child.stderr.on("data", (chunk) => (stderr += String(chunk)))
+    child.stdout.on("data", (chunk) => (stdout = keep(stdout, chunk)))
+    child.stderr.on("data", (chunk) => (stderr = keep(stderr, chunk)))
     child.on("error", (err) => {
       clearTimeout(timer)
       reject(err)
@@ -183,46 +192,37 @@ function listenForCode(state: string): Promise<{ port: number; code: Promise<str
           return
         }
         res.writeHead(result.ok ? 200 : 400, { "Content-Type": "text/html; charset=utf-8" })
-        res.end(`<!doctype html><title>Agent Office</title><p>${result.ok ? "Pi is connected to Agent Office. You can close this tab." : `Not connected: ${result.message}`}</p>`)
+        res.end(`<!doctype html><title>Agent Office</title><p>${result.ok ? "Pi is connected to Agent Office. You can close this tab." : `Not connected: ${escapeHtml(result.message)}`}</p>`)
       })
-      server.once("error", (err: NodeJS.ErrnoException) => {
+      const cancel = (err: Error) => {
+        if (settled) return
+        settled = true
+        pendingCallbacks.delete(state)
         clearTimeout(timer)
+        server.close()
+        rejectCode(err)
+      }
+      server.once("error", (err: NodeJS.ErrnoException) => {
         if (!server.listening && err.code === "EADDRINUSE") {
           attempt(offset + 1)
           return
         }
-        if (!settled) {
-          settled = true
-          pendingCallbacks.delete(state)
-          rejectCode(new Error(`cannot listen on ${callback}: ${err.message}`))
-        }
+        cancel(new Error(`cannot listen on ${callback}: ${err.message}`))
       })
       server.listen(port, "127.0.0.1", () => {
         if (settled) return
-        timer = setTimeout(() => {
-          if (settled) return
-          settled = true
-          pendingCallbacks.delete(state)
-          server.close()
-          rejectCode(new Error("timed out waiting for the approval in the browser"))
-        }, APPROVAL_TIMEOUT_MS)
+        timer = setTimeout(() => cancel(new Error("timed out waiting for the approval in the browser")), APPROVAL_TIMEOUT_MS)
         pendingCallbacks.set(state, {
           resolve: resolveCode,
           reject: rejectCode,
           close: () => {
+            settled = true
             clearTimeout(timer)
             server.close()
           },
+          cancel,
         })
-        resolve({
-          port,
-          code,
-          close: () => {
-            pendingCallbacks.delete(state)
-            clearTimeout(timer)
-            server.close()
-          },
-        })
+        resolve({ port, code, close: () => cancel(new Error("approval cancelled")) })
       })
     }
     attempt(0)
@@ -294,49 +294,94 @@ export default function agentOffice(pi: ExtensionAPI) {
   const clientName = process.env.AGENT_OFFICE_CLIENT_NAME ?? `${basename(directory) || "Pi"}@${hostname().split(".")[0]}`
 
   const resolved = resolveCredentials(directory, canonical)
-  const { legacyCredentialsFile, pointerFile } = resolved
+  const { legacyCredentialsFile, pointerFile, repoPointerFile } = resolved
   let credentialsFile = resolved.credentialsFile
   const usingCredentialsOverride = Boolean(CREDENTIALS_OVERRIDE)
   const auth = createBearer(() => credentialsFile, resolved.credentials)
   const { call, checkin } = createClient(auth.bearer)
 
+  const sameCredentials = (a: Credentials, b: Credentials) =>
+    a.office === b.office && a.client_id === b.client_id && a.access_token === b.access_token && a.refresh_token === b.refresh_token && a.expires_at === b.expires_at
   const adoptAgent = (slug?: string) => {
     if (usingCredentialsOverride || !slug) return
     const target = agentCredentialsPath(slug)
-    if (auth.credentials) saveCredentials(target, auth.credentials)
+    if (auth.credentials) {
+      const current = loadCredentials(target)
+      if (!current || !sameCredentials(current, auth.credentials)) saveCredentials(target, auth.credentials)
+    }
     credentialsFile = target
-    saveAgentPointer(pointerFile, slug)
+    saveAgentPointers(directory, canonical, slug)
   }
   const dispatchDir = () => agentStateDir(legacyCredentialsFile, "dispatch", ownAgent?.slug ?? locationKey)
   const noticeDir = () => agentStateDir(legacyCredentialsFile, "notices", ownAgent?.slug ?? locationKey)
-  const configuredDispatch = String(process.env.AGENT_OFFICE_AUTODISPATCH ?? "on").toLowerCase()
+  const configuredDispatch = String(process.env.AGENT_OFFICE_AUTODISPATCH ?? "on").trim().toLowerCase()
   const dispatchMode = configuredDispatch === "off" || configuredDispatch === "false" ? "off" : "session"
 
   // The office MCP server authenticates through a self-refreshing bearer
-  // command: Pi runs the token helper for each connection, which reads and
-  // refreshes the shared credentials. Registered once the first token exists.
+  // command: Pi resolves it once when it creates the server transport, so the
+  // registration is refreshed before the access token expires (a static header
+  // on a live connection is not re-run per request).
   let mcpRegistered = false
+  let lastMcpError: string | undefined
+  let mcpTimer: ReturnType<typeof setTimeout> | undefined
+  let mcpRefreshAt: number | undefined
   const bearerCommand = () => {
     const runtime = TOKEN_SCRIPT.includes(`${sep}node_modules${sep}`) ? "bun" : process.execPath
     return `!${shq(runtime)} ${shq(TOKEN_SCRIPT)} --dir ${shq(directory)}`
   }
-  const connectMcp = async () => {
-    if (mcpRegistered) return
-    if (!(await auth.bearer())) return
+  const clearMcpTimer = () => {
+    if (mcpTimer) clearTimeout(mcpTimer)
+    mcpTimer = undefined
+    mcpRefreshAt = undefined
+  }
+  const scheduleMcpRefresh = () => {
+    clearMcpTimer()
+    if (process.env.AGENT_OFFICE_TOKEN || !auth.credentials) return
+    const expiresAt = auth.credentials.expires_at
+    if (!Number.isFinite(expiresAt)) return
+    const delay = Math.max(expiresAt - Date.now() - REFRESH_EARLY_MS, 10_000)
+    mcpRefreshAt = Date.now() + delay
+    mcpTimer = setTimeout(() => void connectMcp(true).catch((err) => warn("could not refresh the office MCP connection", { error: String(err) })), delay)
+    mcpTimer.unref()
+  }
+  const connectMcp = async (force = false) => {
+    if (mcpRegistered && !force) return
+    let token: string | undefined
     try {
-      ;(pi as any).registerMcpServer("office", {
+      token = await auth.bearer()
+    } catch (err) {
+      lastMcpError = String(err)
+      warn("could not read the Office token", { error: String(err) })
+      return
+    }
+    if (!token) return
+    try {
+      if (typeof pi.registerMcpServer !== "function") throw new Error("this Pi build has no registerMcpServer; Pi 0.99 or newer is required")
+      if (force && mcpRegistered) {
+        mcpRegistered = false
+        if (typeof pi.unregisterMcpServer === "function") {
+          try {
+            pi.unregisterMcpServer("office")
+          } catch {}
+        }
+      }
+      pi.registerMcpServer("office", {
         url: `${OFFICE}/mcp`,
         headers: { Authorization: bearerCommand() },
         description: "Agent Office: check in, read tasks and messages, post journal entries and decisions",
       })
       mcpRegistered = true
+      lastMcpError = undefined
+      scheduleMcpRefresh()
     } catch (err) {
+      lastMcpError = String(err)
       warn("could not register the office MCP server", { error: String(err) })
     }
   }
 
   const note = `pi: ${basename(directory)}`
   let streaming = false
+  let working = false
   let heartbeat: ReturnType<typeof setInterval> | undefined
   let pollTimer: ReturnType<typeof setInterval> | undefined
   let queue = Promise.resolve()
@@ -346,6 +391,11 @@ export default function agentOffice(pi: ExtensionAPI) {
   let lastPending: Record<string, number> | undefined
   let ownAgent: { id?: string; slug?: string } | undefined
   let lastCtx: ExtensionContext | undefined
+  const backlog = new Set<string>()
+  const dispatching = new Set<string>()
+  const assignedKeys = new Map<string, string>()
+  const repo = canonical ?? directory
+  const isChild = process.env.AGENT_OFFICE_CHILD === "1"
 
   const notice = (text: string, level: "info" | "warning" | "error" = "info") => {
     try {
@@ -381,46 +431,82 @@ export default function agentOffice(pi: ExtensionAPI) {
     return queue
   }
 
+  // A dispatch worker is activity too: keep the agent working until both this
+  // session and its workers settle. Child processes never report status, so a
+  // worker cannot flip the shared agent idle under the parent session.
+  const refreshWorking = () => {
+    const next = !isChild && (streaming || dispatching.size > 0)
+    if (next === working) return
+    working = next
+    if (next) {
+      heartbeat = setInterval(() => checkin().catch(() => {}), HEARTBEAT_MS)
+      heartbeat.unref()
+      void report("working")
+    } else {
+      if (heartbeat) clearInterval(heartbeat)
+      heartbeat = undefined
+      void report("idle")
+    }
+  }
   const startWorking = () => {
     if (streaming) return
     streaming = true
-    heartbeat = setInterval(() => checkin().catch(() => {}), HEARTBEAT_MS)
-    heartbeat.unref()
-    void report("working")
+    refreshWorking()
   }
   const stopWorking = () => {
     if (!streaming) return
     streaming = false
-    clearInterval(heartbeat)
-    void report("idle")
+    refreshWorking()
   }
 
-  const connectedSummary = async () => {
-    await connectMcp()
+  const connectedSummary = async (reconnectMcp = false) => {
+    // Check in before saving under an agent name: the approval token is in
+    // memory (and a pending file), so a switch to a different agent cannot
+    // overwrite the previous agent's credentials.
     const me = await checkin()
     adoptAgent(me.agent?.slug)
     ownAgent = me.agent
+    await connectMcp(reconnectMcp)
     await observePending(me.pending, false)
     const pending = me.pending ?? {}
-    const summaryLine = `Connected to Agent Office as @${me.agent?.slug} (${me.agent?.name}). Open tasks: ${pending.open_tasks?.length ?? 0}, unclaimed team tasks: ${pending.unclaimed_team_tasks?.length ?? 0}, unread messages: ${pending.unread_messages?.length ?? 0}. The office MCP tools are available; call checkin first.`
+    const mcpLine = mcpRegistered
+      ? "The office MCP tools are available; call checkin first."
+      : `The office MCP server is not registered${lastMcpError ? `: ${lastMcpError}` : ""}.`
+    const summaryLine = `Connected to Agent Office as @${me.agent?.slug} (${me.agent?.name}). Open tasks: ${pending.open_tasks?.length ?? 0}, unclaimed team tasks: ${pending.unclaimed_team_tasks?.length ?? 0}, unread messages: ${pending.unread_messages?.length ?? 0}. ${mcpLine}`
     if (!existsSync(POLL_SCRIPT)) return summaryLine
     return `${summaryLine}\nTo keep handling Office work while Pi is closed, add this line to the crontab (crontab -e), or ask to have it added:\n${cronLine(directory, POLL_SCRIPT)}`
   }
 
   // The approval in flight. A loopback callback finishes it in the background
   // and tells the session; a pasted URL reports it in reply.
-  let approval: { state: string; done: Promise<string>; pasted: boolean; close: () => void } | undefined
+  let approval: { state: string; done: Promise<string>; pasted: boolean; cancel: () => void } | undefined
   const startApproval = async (approvalName: string) => {
-    approval?.close()
+    approval?.cancel()
     const started = await authorize(approvalName)
     const current = {
       state: started.state,
-      close: started.close,
+      cancel: started.close,
       pasted: false,
       done: started.credentials.then(async (next) => {
         auth.credentials = next
-        saveCredentials(credentialsFile, next)
-        return connectedSummary()
+        const previousFile = credentialsFile
+        const pendingFile = usingCredentialsOverride ? undefined : join(dirname(legacyCredentialsFile), `pending-${started.state}.json`)
+        if (pendingFile) {
+          saveCredentials(pendingFile, next)
+          credentialsFile = pendingFile
+        } else {
+          saveCredentials(credentialsFile, next)
+        }
+        try {
+          return await connectedSummary(true)
+        } finally {
+          if (pendingFile) {
+            try {
+              unlinkSync(pendingFile)
+            } catch {}
+            if (credentialsFile === pendingFile) credentialsFile = previousFile
+          }
+        }
       }),
     }
     approval = current
@@ -452,11 +538,9 @@ export default function agentOffice(pi: ExtensionAPI) {
 
   // Auto-dispatch: new assigned todo tasks run in their own worktree as a
   // headless worker Pi, up to MAX_DISPATCHES at once across every process.
-  const backlog = new Set<string>()
-  const dispatching = new Set<string>()
-  const repo = canonical ?? directory
-
   const dispatchTask = async (id: string) => {
+    const assignedKey = assignedKeys.get(id)
+    let workerStarted = false
     try {
       const detail = await call("get_task", { task_id: id }).catch(() => undefined)
       const task = (detail as any)?.task ?? detail
@@ -464,18 +548,28 @@ export default function agentOffice(pi: ExtensionAPI) {
       const { path, branch } = await addWorktree(repo, id)
       notice(`Agent Office: dispatching task ${id} to a worker in ${path} (${branch}).`)
       const prompt = supervisorPrompt(id, task, path, branch)
-      const result = await run(PI_BIN, ["--print", prompt], path, DISPATCH_STALE_MS).catch((err) => {
+      const result = await run(PI_BIN, ["-e", HERE, "--print", prompt], path, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1" }).catch((err) => {
         warn("could not start the worker", { task: id, error: String(err) })
         return undefined
       })
+      if (result === undefined) {
+        // The worker never started: a missing binary or environment problem is
+        // retryable, unlike a worker that ran and exited non-zero.
+        if (assignedKey) seenAssigned.delete(assignedKey)
+        return
+      }
+      workerStarted = true
       notice(`Agent Office task ${id} worker exited (${result?.code ?? "error"}). Review ${path}; it opens the PR and updates the task.`)
     } catch (err) {
+      if (!workerStarted && assignedKey) seenAssigned.delete(assignedKey)
       warn("could not dispatch Office task", { task: id, error: String(err) })
       notice(`Agent Office: could not dispatch task ${id}: ${String(err)}`, "error")
     } finally {
       releaseDispatch(dispatchDir(), id)
       dispatching.delete(id)
+      assignedKeys.delete(id)
       pumpDispatch()
+      refreshWorking()
     }
   }
 
@@ -486,8 +580,12 @@ export default function agentOffice(pi: ExtensionAPI) {
       const acquired = acquireDispatch(dispatchDir(), id)
       if (acquired === "full") return
       backlog.delete(id)
-      if (acquired === "busy") continue
+      if (acquired === "busy") {
+        assignedKeys.delete(id)
+        continue
+      }
       dispatching.add(id)
+      refreshWorking()
       void dispatchTask(id)
     }
   }
@@ -521,28 +619,28 @@ export default function agentOffice(pi: ExtensionAPI) {
     for (const item of assigned) seenAssigned.add(itemKey(item, "task"))
 
     for (const item of freshAssigned) {
-      if (String(item?.status ?? "todo").toLowerCase() === "todo") backlog.add(taskID(item))
+      const id = taskID(item)
+      if (String(item?.status ?? "todo").toLowerCase() === "todo" && dispatchMode !== "off") {
+        assignedKeys.set(id, itemKey(item, "task"))
+        backlog.add(id)
+      }
     }
 
     if (freshMessages.length > 0) {
       const ids = freshMessages.map((item) => itemKey(item, "message"))
-      if (!claimNotice(noticeDir(), ids)) {
-        for (const item of freshMessages) seenMessages.add(itemKey(item, "message"))
-      } else if (wake(inboxPrompt(freshMessages))) {
-        for (const item of freshMessages) seenMessages.add(itemKey(item, "message"))
-      } else {
-        releaseNotice(noticeDir(), ids)
+      if (claimNotice(noticeDir(), ids)) {
+        if (wake(inboxPrompt(freshMessages))) {
+          for (const item of freshMessages) seenMessages.add(itemKey(item, "message"))
+        } else {
+          releaseNotice(noticeDir(), ids)
+        }
       }
+      // A failed claim means another process owns the batch. Leave it unseen:
+      // if that process dies, the claim expires and this poll retries it.
     }
 
     if (freshTasks.length > 0 || freshAssigned.length > 0) {
-      const listed = [
-        ...freshTasks.slice(0, 5).map((item) => ({ kind: "unclaimed", id: itemKey(item, "task"), title: summary(item) })),
-        ...freshAssigned.slice(0, 5).map((item) => ({ kind: "assigned", id: itemKey(item, "task"), status: String(item?.status ?? "todo"), title: summary(item) })),
-      ]
       notice(`Agent Office poll: ${freshTasks.length} new unclaimed, ${freshAssigned.length} new assigned task(s). Use list_tasks in the office MCP server.`)
-      void listed
-      void officeData
     }
     if (backlog.size > 0) pumpDispatch()
   }
@@ -563,9 +661,10 @@ export default function agentOffice(pi: ExtensionAPI) {
     }
   }
 
-  const configuredPoll = Number(process.env.AGENT_OFFICE_POLL_MS ?? DEFAULT_POLL_MS)
-  const pollInterval = Number.isFinite(configuredPoll) ? Math.max(configuredPoll, 1_000) : DEFAULT_POLL_MS
-  const pollingAllowed = !onTaskBranch(directory) && !inHerdrWorktree(directory)
+  const configuredPoll = process.env.AGENT_OFFICE_POLL_MS?.trim()
+  const configuredPollNumber = configuredPoll ? Number(configuredPoll) : NaN
+  const pollInterval = Number.isFinite(configuredPollNumber) ? Math.max(configuredPollNumber, 1_000) : DEFAULT_POLL_MS
+  const pollingAllowed = !isChild && !onTaskBranch(directory) && !inHerdrWorktree(directory)
 
   // --- status reporting on this session's own streaming ---
   pi.on("session_start", async (_event, ctx) => {
@@ -585,13 +684,15 @@ export default function agentOffice(pi: ExtensionAPI) {
     lastCtx = ctx
     stopWorking()
   })
-  pi.on("turn_end", async (_event, ctx) => {
-    lastCtx = ctx
-  })
   pi.on("session_shutdown", async () => {
     clearInterval(heartbeat)
+    heartbeat = undefined
     clearInterval(pollTimer)
-    if (streaming) {
+    pollTimer = undefined
+    clearMcpTimer()
+    approval?.cancel()
+    if (working) {
+      working = false
       streaming = false
       await report("idle")
     }
@@ -612,22 +713,21 @@ export default function agentOffice(pi: ExtensionAPI) {
       const argument = rest.join(" ").trim()
       try {
         if (verb === "status") {
-          ctx.ui.notify(statusReport(), "info")
-          pi.sendUserMessage(`Agent Office status:\n${statusReport()}`)
+          const report = statusReport()
+          ctx.ui.notify(report, "info")
+          wake(`Agent Office status:\n${report}`)
           return
         }
         if (!input && (await auth.bearer())) {
           ctx.ui.notify("Checking Agent Office…", "info")
-          pi.sendUserMessage(await connectedSummary())
+          wake(await connectedSummary())
           return
         }
-        const reconnect = verb === "reconnect"
         const name = verb === "register" ? argument : input && verb !== "reconnect" ? input : ""
-        void reconnect
         const approvalName = name ? name.slice(0, 80) : clientName
         const url = await startApproval(approvalName)
         ctx.ui.notify("Agent Office approval started; see the link in the chat.", "info")
-        pi.sendUserMessage(approvalText(approvalName, url))
+        if (!wake(approvalText(approvalName, url))) ctx.ui.notify(`Open this link and approve: ${url}`, "info")
       } catch (err) {
         ctx.ui.notify(`Agent Office: ${err instanceof Error ? err.message : String(err)}`, "error")
       }
@@ -677,12 +777,17 @@ export default function agentOffice(pi: ExtensionAPI) {
         credentialsFile,
         tokenStorage: usingCredentialsOverride ? "override" : "agent",
         agentPointer: pointerFile,
+        repoPointer: repoPointerFile,
         clientName,
         mode: dispatchMode,
         pollInterval,
         pollingAllowed,
         mcpRegistered,
+        working,
         streaming,
+        isChild,
+        lastMcpError,
+        mcpRefreshAt: mcpRefreshAt ? new Date(mcpRefreshAt).toISOString() : undefined,
         lastPollAt: lastPollAt ? new Date(lastPollAt).toISOString() : undefined,
         lastPollError,
         lastPromptAt: lastPromptAt ? new Date(lastPromptAt).toISOString() : undefined,
@@ -702,7 +807,10 @@ export default function agentOffice(pi: ExtensionAPI) {
 function canonicalRoot(directory: string): string {
   try {
     const { execFileSync } = require("node:child_process") as typeof import("node:child_process")
-    const common = execFileSync("git", ["-C", directory, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim()
+    const common = execFileSync("git", ["-C", directory, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim()
     return common.endsWith(`${sep}.git`) || common.endsWith("/.git") ? dirname(common) : directory
   } catch {
     return directory

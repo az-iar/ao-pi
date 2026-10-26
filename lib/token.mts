@@ -10,14 +10,14 @@
 // and storage match. Tokens are printed only as the header value, never logged.
 
 import { parseArgs } from "node:util"
-import { resolve } from "node:path"
+import { basename, dirname, resolve } from "node:path"
 import { spawnSync } from "node:child_process"
 import { createBearer, resolveCredentials } from "./office.ts"
 
 function canonicalRoot(directory: string) {
   const git = spawnSync("git", ["-C", directory, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" })
   const common = git.status === 0 ? git.stdout.trim() : ""
-  return common.endsWith("/.git") ? common.slice(0, -"/.git".length) : directory
+  return basename(common) === ".git" ? dirname(common) : directory
 }
 
 const { values } = parseArgs({ options: { dir: { type: "string" } } })

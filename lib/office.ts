@@ -7,12 +7,12 @@
 // Tokens are never logged.
 
 import { spawn, spawnSync } from "node:child_process"
-import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { createHash, randomBytes } from "node:crypto"
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, dirname, join, sep } from "node:path"
 
-export const OFFICE = (process.env.AGENT_OFFICE_URL ?? "https://office.byma.tech").replace(/\/+$/, "")
+export const OFFICE = (process.env.AGENT_OFFICE_URL?.trim() || "https://office.byma.tech").replace(/\/+$/, "")
 export const CREDENTIALS_OVERRIDE = process.env.AGENT_OFFICE_PI_CREDENTIALS
 const CREDENTIALS_DIR = join(homedir(), ".config", "agent-office", "pi")
 const AGENTS_DIR = join(CREDENTIALS_DIR, "agents")
@@ -94,14 +94,38 @@ export function loadAgentPointer(path: string): string | undefined {
   }
 }
 
-export function saveAgentPointer(path: string, slug: string) {
+// Small files written under ~/.config must never be observed half-written by
+// another Pi process, and an existing file keeps its old mode without chmod.
+function writePrivateJson(path: string, value: unknown) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-  writeFileSync(path, JSON.stringify({ agent: slug }, null, 2) + "\n", { mode: 0o600 })
+  const temp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`
+  try {
+    writeFileSync(temp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 })
+    renameSync(temp, path)
+    try {
+      chmodSync(path, 0o600)
+    } catch {}
+  } finally {
+    try {
+      unlinkSync(temp)
+    } catch {}
+  }
+}
+
+export function saveAgentPointer(path: string, slug: string) {
+  writePrivateJson(path, { agent: slug })
+}
+
+// The workspace pointer is keyed by the exact cwd; the repo pointer by the
+// canonical root. Save both so approving in a subdirectory also connects the
+// repository root, rather than only the subdirectory that ran /office.
+export function saveAgentPointers(directory: string, canonical: string | undefined, slug: string) {
+  const paths = new Set([agentPointerPath(directory), agentPointerPath(canonical ?? directory)])
+  for (const path of paths) if (loadAgentPointer(path) !== slug) saveAgentPointer(path, slug)
 }
 
 export function saveCredentials(path: string, c: Credentials) {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-  writeFileSync(path, JSON.stringify(c, null, 2) + "\n", { mode: 0o600 })
+  writePrivateJson(path, c)
 }
 
 // The workspace's agent pointer names the agent's token file; without one the
@@ -354,10 +378,20 @@ export function addWorktree(repo: string, id: string): Promise<{ path: string; b
   const short = taskShort(id)
   const branch = `office/${short}`
   const path = join(dirname(repo), `${basename(repo)}-office-${short}`)
-  if (existsSync(path)) return Promise.resolve({ path, branch })
+  if (existsSync(path)) {
+    const current = spawnSync("git", ["-C", path, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" })
+    if (current.status === 0 && current.stdout.trim() === branch) return Promise.resolve({ path, branch })
+    return Promise.reject(new Error(`worktree path ${path} exists but is not a worktree on ${branch}`))
+  }
+  // A previous attempt can leave the branch and stale worktree metadata behind.
+  spawnSync("git", ["-C", repo, "worktree", "prune"], { encoding: "utf8" })
+  const branchExists = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]).status === 0
   const remote = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", "origin/HEAD"]).status === 0
+  const args = branchExists
+    ? ["-C", repo, "worktree", "add", path, branch]
+    : ["-C", repo, "worktree", "add", "-b", branch, path, ...(remote ? ["origin/HEAD"] : [])]
   return new Promise((done, fail) => {
-    const git = spawn("git", ["-C", repo, "worktree", "add", "-b", branch, path, ...(remote ? ["origin/HEAD"] : [])], { stdio: ["ignore", "ignore", "pipe"] })
+    const git = spawn("git", args, { stdio: ["ignore", "ignore", "pipe"] })
     let stderr = ""
     git.stderr.on("data", (chunk) => (stderr += String(chunk)))
     git.on("error", fail)
@@ -368,38 +402,69 @@ export function addWorktree(repo: string, id: string): Promise<{ path: string; b
 // One lock per dispatched task, shared by every Pi process using this agent.
 // That keeps the two-dispatch cap across child agents and cron too.
 const lockPath = (dir: string, id: string) => join(dir, `${createHash("sha256").update(id).digest("hex").slice(0, 16)}.lock`)
+const mutexPath = (dir: string) => join(dir, ".acquire")
+const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+
+// Counting active task locks and creating one must be one critical section;
+// otherwise several processes all see one free slot and start a third task.
+function withDispatchMutex<T>(dir: string, run: () => T): T | undefined {
+  const mutex = mutexPath(dir)
+  for (let i = 0; i < 200; i++) {
+    try {
+      writeFileSync(mutex, JSON.stringify({ pid: process.pid, created: Date.now() }) + "\n", { flag: "wx", mode: 0o600 })
+      try {
+        return run()
+      } finally {
+        try {
+          unlinkSync(mutex)
+        } catch {}
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
+      try {
+        if (Date.now() - statSync(mutex).mtimeMs > 30_000) unlinkSync(mutex)
+      } catch {}
+      sleepSync(10)
+    }
+  }
+  return undefined
+}
+
 export function acquireDispatch(dir: string, id: string): "ok" | "busy" | "full" {
-  const own = lockPath(dir, id)
-  try {
-    statSync(own)
-    return "busy"
-  } catch {}
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 })
   } catch {
     return "busy"
   }
-  let active = 0
+  const own = lockPath(dir, id)
   try {
-    for (const file of readdirSync(dir)) {
-      if (!file.endsWith(".lock")) continue
-      const path = join(dir, file)
-      try {
-        if (Date.now() - statSync(path).mtimeMs > DISPATCH_STALE_MS) {
-          unlinkSync(path)
-          continue
-        }
-        active++
-      } catch {}
-    }
+    const age = Date.now() - statSync(own).mtimeMs
+    if (age <= DISPATCH_STALE_MS) return "busy"
+    unlinkSync(own)
   } catch {}
-  if (active >= MAX_DISPATCHES) return "full"
-  try {
-    writeFileSync(own, JSON.stringify({ task: id, pid: process.pid, created: Date.now() }) + "\n", { flag: "wx", mode: 0o600 })
-    return "ok"
-  } catch {
-    return "busy"
-  }
+  return (
+    withDispatchMutex(dir, () => {
+      let active = 0
+      for (const file of readdirSync(dir)) {
+        if (!file.endsWith(".lock")) continue
+        const path = join(dir, file)
+        try {
+          if (Date.now() - statSync(path).mtimeMs > DISPATCH_STALE_MS) {
+            unlinkSync(path)
+            continue
+          }
+          active++
+        } catch {}
+      }
+      if (active >= MAX_DISPATCHES) return "full"
+      try {
+        writeFileSync(own, JSON.stringify({ task: id, pid: process.pid, created: Date.now() }) + "\n", { flag: "wx", mode: 0o600 })
+        return "ok"
+      } catch {
+        return "busy"
+      }
+    }) ?? "busy"
+  )
 }
 export function releaseDispatch(dir: string, id: string) {
   try {

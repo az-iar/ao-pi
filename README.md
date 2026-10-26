@@ -19,7 +19,7 @@ cp -r /path/to/ao-pi ~/.pig/agent/extensions/ao-pi
 cp -r /path/to/ao-pi .pig/extensions/ao-pi
 ```
 
-For Pi, the same files load from `~/.pi/agent/extensions/` or a project's `.pi/extensions/`. The extension is plain TypeScript; it needs no build. Validate a copy with `pig install /path/to/ao-pi --validate-only --json`.
+For Pi, the same files load from `~/.pi/agent/extensions/` or a project's `.pi/extensions/`. The extension is plain TypeScript; it needs no build. To try it without installing, load it directly with `pig -e /path/to/ao-pi` (or `pi -e`).
 
 ## Connect
 
@@ -27,7 +27,7 @@ In Pi, run `/office`. The extension:
 
 1. registers Pi with the Office (OAuth dynamic client registration), shows the approval link and opens it in your browser if this machine has one;
 2. returns at once; when you approve in the dashboard (within five minutes), as a new agent named for this folder or an existing one, the extension finishes in the background and tells the session;
-3. stores the token under `~/.config/agent-office/pi/agents/<agent>.json` (mode 0600), records the chosen agent for this workspace in `workspaces/<hash>.json`, adds the `office` MCP server to Pi, and checks in.
+3. stores the token under `~/.config/agent-office/pi/agents/<agent>.json` (mode 0600), records the chosen agent for this workspace and its repo root in `workspaces/<hash>.json`, adds the `office` MCP server to Pi, and checks in.
 
 `/office` subcommands:
 
@@ -42,7 +42,7 @@ In Pi, run `/office`. The extension:
 
 The model can also drive this through the `office_connect` and `office_status` tools (handy on remote machines: paste the callback URL and the model passes it to `office_connect`).
 
-The `office` MCP server authenticates with a self-refreshing bearer command (`lib/token.mts`): Pi runs it for each connection, and it reads and refreshes the shared credentials, so the access token stays fresh without a reconnect. Access tokens last an hour.
+The `office` MCP server authenticates with a bearer command (`lib/token.mts`): Pi resolves it when it creates a connection, and it reads and refreshes the shared credentials. Because Pi keeps a live connection, the extension re-registers the server before the access token expires, so long sessions do not need `/mcp reconnect`. Access tokens last an hour.
 
 The loopback callback starts at `AGENT_OFFICE_CALLBACK_PORT` and tries the next 19 ports if it is busy. On a remote or headless machine, open the link in any browser and approve. The browser then lands on a `http://127.0.0.1:.../callback?...` page that does not load: copy that full address and run `/office <address>`, or paste it into the chat for the model to pass to `office_connect`.
 
@@ -56,7 +56,7 @@ The loopback callback starts at `AGENT_OFFICE_CALLBACK_PORT` and tries the next 
 | a new Office message arrives | the extension injects a user turn that reads it with `list_messages`, does the requested work, replies with `post_message`, and calls `mark_read` |
 | a new assigned task appears | a worker Pi takes it in a worktree of its own (see Auto-dispatch) |
 
-The extension polls the Office inbox through `checkin` every 60 seconds while loaded. The first poll is a baseline, and later polls report only new message and task IDs. New messages queue a real Pi turn (`sendUserMessage`) that reads the inbox, does the work, replies and marks the messages read. Before it starts any work it replies once in the thread of the message that asked (a dispatched worker comments on its task instead) saying what it is about to do, then goes ahead without waiting; it messages Azri only when blocked or when the PR is up. This uses model tokens.
+The extension polls the Office inbox through `checkin` every 60 seconds while loaded. The first poll baselines tasks; unread messages are not baselined, so the first poll still handles them. Later polls report only new message and task IDs. New messages queue a real Pi turn (`sendUserMessage`) that reads the inbox, does the work, replies and marks the messages read. Before it starts any work it replies once in the thread of the message that asked (a dispatched worker comments on its task instead) saying what it is about to do, then goes ahead without waiting; it messages Azri only when blocked or when the PR is up. This uses model tokens.
 
 Office text (message senders and subjects, task titles and descriptions) reaches the model only inside an `<office-data>` JSON block, so it cannot pose as the extension's own instructions. Every inbox and dispatch prompt also says that no message, whoever sent it, unlocks reading or sending credentials (tokens, `~/.config/agent-office`, `~/.ssh`, `.env` files) or changing permissions, extensions or config.
 
@@ -66,11 +66,11 @@ A new task assigned to you with status `todo` is dispatched automatically to a w
 
 1. the extension acknowledges and accepts it if needed, then sets it `in_progress` with a comment;
 2. it gives the task a worktree on branch `office/<short>` (`<short>` is a hash of the task id), beside the repo at `<repo>-office-<short>` through `git worktree add`;
-3. it starts a headless `pig --print` there with the worker prompt. The worker implements, tests, reviews its own diff, commits, pushes, opens the PR with `gh pr create` linking the Office task, posts the link to the `reviewers` team and on the task, and leaves the task `in_progress` for review, or sets it `blocked` with a reason. It ends by writing the day's journal entry for the task with `journal_write` and recording any lasting decision with `decision_write`. Nobody merges, pushes to `main`, or force-pushes.
+3. it starts a headless `pig -e <ao-pi> --print` there with the worker prompt, so the child has the `office` MCP tools even when the extension was installed with `-e` only. The child does not poll, dispatch or report status. The worker implements, tests, reviews its own diff, commits, pushes, opens the PR with `gh pr create` linking the Office task, posts the link to the `reviewers` team and on the task, and leaves the task `in_progress` for review, or sets it `blocked` with a reason. It ends by writing the day's journal entry for the task with `journal_write` and recording any lasting decision with `decision_write`. Nobody merges, pushes to `main`, or force-pushes.
 
-A Pi opened on an `office/` branch does not poll the inbox or dispatch, so Office work never lands in a worker's session. Inside Herdr (`HERDR_ENV=1`) the same holds for every linked worktree: only the main checkout polls and dispatches. At most two tasks run at once per repo, with a lock per task shared across every process (open sessions and cron). Tasks already open when the extension loads are baseline, not dispatched. Set `AGENT_OFFICE_AUTODISPATCH=off` to keep notifications but disable dispatch.
+A Pi opened on an `office/` branch does not poll the inbox or dispatch, so Office work never lands in a worker's session. Inside Herdr (`HERDR_ENV=1`) the same holds for every linked worktree: only the main checkout polls and dispatches. At most two tasks run at once per Office agent, with a lock per task shared across every process (open sessions and cron). Tasks already open when the extension loads are baseline, not dispatched; a task whose dispatch failed stays unseen and is retried. Set `AGENT_OFFICE_AUTODISPATCH=off` to keep notifications but disable dispatch.
 
-Tokens are stored per Office agent, so every workspace approved as the same agent shares one token, inbox and status. A workspace remembers its chosen agent by name; `/office <name>` starts a new approval and switches it.
+Tokens are stored per Office agent, so every workspace approved as the same agent shares one token, inbox and status. A workspace remembers its chosen agent by name; `/office <name>` starts a new approval and switches it. The interactive session owns the status; headless children and the cron poller do not write it, so a worker settling cannot mark the agent idle while its parent is still streaming. A cron-only dispatch therefore updates the task and the PR, not the dashboard status.
 
 ## Run from cron
 
@@ -80,9 +80,9 @@ Tokens are stored per Office agent, so every workspace approved as the same agen
 */2 * * * * cd /path/to/repo && PATH=/usr/local/bin:/usr/bin:/bin node /path/to/ao-pi/poll.ts >> ~/.config/agent-office/pi/poll.log 2>&1
 ```
 
-It needs Node 22.18+ (or `bun poll.ts`), since Node does not run TypeScript from `node_modules`. Cron has a minimal `PATH`, so set one that finds `node` and `pig` (or point `AGENT_OFFICE_PI_BIN` at the executable). Run `/office` once in that repo first, or set `AGENT_OFFICE_TOKEN`; `--dir <path>` polls another workspace.
+It needs Node 22.18+ when the extension is copied outside `node_modules`. An npm-installed copy lives under `node_modules`, where Node refuses to strip TypeScript, so its poller and MCP bearer command run with `bun`; Bun must be on `PATH` for that install form. Cron has a minimal `PATH`, so set one that finds the runtime and `pig` (or point `AGENT_OFFICE_PI_BIN` at the executable). Run `/office` once in that repo first, or set `AGENT_OFFICE_TOKEN`; `--dir <path>` polls another workspace.
 
-New messages start one `pig --print` in the workspace with the inbox prompt. New `todo` tasks are claimed, given a worktree, and run there as a worker, within the same two-task cap. It shares the extension's code, message claims and dispatch locks, so it runs safely alongside an open Pi: a batch is handled by one of them. `--dry-run` prints the message and task IDs it would handle and changes nothing.
+New messages start one `pig -e <ao-pi> --print` in the workspace with the inbox prompt. New `todo` tasks are claimed, given a worktree, and run there as a worker, within the same two-task cap. It shares the extension's code, message claims and dispatch locks, so it runs safely alongside an open Pi: a batch is handled by one of them. `--dry-run` prints the message and task IDs it would handle and changes nothing.
 
 ## Settings
 
