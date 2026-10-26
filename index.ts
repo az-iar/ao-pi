@@ -325,10 +325,18 @@ export default function agentOffice(pi: ExtensionAPI) {
   let lastMcpError: string | undefined
   let mcpTimer: ReturnType<typeof setTimeout> | undefined
   let mcpRefreshAt: number | undefined
-  const bearerCommand = () => {
-    const runtime = TOKEN_SCRIPT.includes(`${sep}node_modules${sep}`) ? "bun" : process.execPath
-    return `!${shq(runtime)} ${shq(TOKEN_SCRIPT)} --dir ${shq(directory)}`
+  // Pi can run as a standalone binary whose process.execPath is not a JS
+  // runtime, so fall back to node or bun from PATH for the token script.
+  const onPath = (name: string) =>
+    (process.env.PATH ?? "").split(":").some((dir) => dir !== "" && existsSync(join(dir, name)))
+  const tokenRuntime = () => {
+    const name = basename(process.execPath)
+    if (name === "node" || name === "bun") return process.execPath
+    if (TOKEN_SCRIPT.includes(`${sep}node_modules${sep}`) && onPath("bun")) return "bun"
+    for (const candidate of ["node", "bun"]) if (onPath(candidate)) return candidate
+    return process.execPath
   }
+  const bearerCommand = () => `!${shq(tokenRuntime())} ${shq(TOKEN_SCRIPT)} --dir ${shq(directory)}`
   const clearMcpTimer = () => {
     if (mcpTimer) clearTimeout(mcpTimer)
     mcpTimer = undefined
