@@ -5,6 +5,16 @@
   "type": "module",
   "main": "index.ts",
   "exports": "./index.ts",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "agent-office"
+  ],
   "files": [
     "index.ts",
     "lib/office.ts",
