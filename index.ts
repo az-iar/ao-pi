@@ -326,15 +326,25 @@ export default function agentOffice(pi: ExtensionAPI) {
   let mcpTimer: ReturnType<typeof setTimeout> | undefined
   let mcpRefreshAt: number | undefined
   // Pi can run as a standalone binary whose process.execPath is not a JS
-  // runtime, so fall back to node or bun from PATH for the token script.
-  const onPath = (name: string) =>
-    (process.env.PATH ?? "").split(":").some((dir) => dir !== "" && existsSync(join(dir, name)))
+  // runtime, so fall back to node or bun from PATH for the token script. The
+  // result is absolute: Pi resolves the header once, and a bare name would
+  // depend on the PATH of whichever shell ends up resolving it.
+  const whichOnPath = (name: string) => {
+    for (const dir of (process.env.PATH ?? "").split(":")) {
+      if (!dir) continue
+      const candidate = join(dir, name)
+      if (existsSync(candidate)) return candidate
+    }
+    return undefined
+  }
   const tokenRuntime = () => {
     const name = basename(process.execPath)
     if (name === "node" || name === "bun") return process.execPath
-    if (TOKEN_SCRIPT.includes(`${sep}node_modules${sep}`) && onPath("bun")) return "bun"
-    for (const candidate of ["node", "bun"]) if (onPath(candidate)) return candidate
-    return process.execPath
+    if (TOKEN_SCRIPT.includes(`${sep}node_modules${sep}`)) {
+      const bun = whichOnPath("bun")
+      if (bun) return bun
+    }
+    return whichOnPath("node") ?? whichOnPath("bun") ?? process.execPath
   }
   const bearerCommand = () => `!${shq(tokenRuntime())} ${shq(TOKEN_SCRIPT)} --dir ${shq(directory)}`
   const clearMcpTimer = () => {
