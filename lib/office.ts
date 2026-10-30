@@ -81,6 +81,10 @@ export function agentCredentialsPath(slug: string): string {
   return join(AGENTS_DIR, `${safe}.json`)
 }
 
+export function sessionPointerPath(sessionId: string): string {
+  return join(CREDENTIALS_DIR, "sessions", `${workspaceKey(sessionId)}.json`)
+}
+
 export function agentPointerPath(directory: string): string {
   return join(POINTERS_DIR, `${workspaceKey(directory)}.json`)
 }
@@ -498,8 +502,8 @@ export function releaseNotice(dir: string, ids: string[]) {
 // The crontab line that runs the poller for a workspace every two minutes.
 // Cron's PATH is minimal, so it carries the caller's. Node will not run
 // TypeScript from node_modules, so an installed extension's poller runs on bun.
-export function cronLine(directory: string, pollScript: string, path = process.env.PATH ?? "") {
+export function cronLine(directory: string, pollScript: string, path = process.env.PATH ?? "", sessionId?: string, credentialsFile?: string) {
   const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`
   const runtime = pollScript.includes(`${sep}node_modules${sep}`) ? "bun" : "node"
-  return `*/2 * * * * cd ${quote(directory)} && PATH=${quote(path)} ${runtime} ${quote(pollScript)} >> "$HOME/.config/agent-office/pi/poll.log" 2>&1`
+  return `*/2 * * * * cd ${quote(directory)} && PATH=${quote(path)} ${runtime} ${quote(pollScript)}${credentialsFile ? ` --credentials ${quote(credentialsFile)}` : sessionId ? ` --session ${quote(sessionId)}` : ""} >> "$HOME/.config/agent-office/pi/poll.log" 2>&1`
 }

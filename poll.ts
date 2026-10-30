@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url"
 import {
   acquireDispatch,
   addWorktree,
+  agentCredentialsPath,
   agentStateDir,
   claimNotice,
   claimTask,
@@ -32,6 +33,9 @@ import {
   fromOthers,
   inboxPrompt,
   itemKey,
+  loadCredentials,
+  loadAgentPointer,
+  sessionPointerPath,
   releaseDispatch,
   releaseNotice,
   resolveCredentials,
@@ -104,12 +108,12 @@ function acquireRunLock(path: string): (() => void) | undefined {
 // never a shell string. The worker runs with its worktree as cwd. `-e` makes
 // the extension load even when it is installed with `-e` only, and the child
 // flag keeps that extension from polling, dispatching or reporting status.
-function runPi(directory: string, prompt: string, timeoutMs: number): { started: Promise<void>; done: Promise<number | null> } {
+function runPi(directory: string, prompt: string, timeoutMs: number, credentialsFile: string): { started: Promise<void>; done: Promise<number | null> } {
   let child: ReturnType<typeof spawn>
   try {
     child = spawn(PI_BIN, ["-e", EXTENSION_DIR, "--print", prompt], {
       cwd: directory,
-      env: { ...process.env, AGENT_OFFICE_CHILD: "1" },
+      env: { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile },
       stdio: ["ignore", "ignore", "inherit"],
     })
   } catch (err) {
@@ -145,13 +149,17 @@ function runPi(directory: string, prompt: string, timeoutMs: number): { started:
 }
 
 async function main(): Promise<number> {
-  const { values } = parseArgs({ options: { dir: { type: "string" }, "dry-run": { type: "boolean" } } })
+  const { values } = parseArgs({ options: { dir: { type: "string" }, credentials: { type: "string" }, session: { type: "string" }, "dry-run": { type: "boolean" } } })
   const directory = resolve(values.dir ?? process.cwd())
   const dryRun = Boolean(values["dry-run"])
   const autoDispatch = !["off", "false"].includes((process.env.AGENT_OFFICE_AUTODISPATCH ?? "on").trim().toLowerCase())
 
   const resolved = resolveCredentials(directory, canonicalRoot(directory))
-  const { bearer } = createBearer(() => resolved.credentialsFile, resolved.credentials)
+  if (values.session && values.credentials) throw new Error("choose --session or --credentials, not both")
+  const sessionAgent = values.session ? loadAgentPointer(sessionPointerPath(values.session)) : undefined
+  if (values.session && !sessionAgent) throw new Error(`no Office agent saved for session ${values.session}`)
+  const credentialsFile = values.credentials ? resolve(values.credentials) : sessionAgent ? agentCredentialsPath(sessionAgent) : resolved.credentialsFile
+  const { bearer } = createBearer(() => credentialsFile, values.credentials || values.session ? loadCredentials(credentialsFile) : resolved.credentials)
   if (!(await bearer())) {
     log(`not connected for ${directory}: run /office in Pi first, or set AGENT_OFFICE_TOKEN`)
     return 2
@@ -210,7 +218,7 @@ async function main(): Promise<number> {
         log(`dispatching task ${id} to ${path}`)
         let job: ReturnType<typeof runPi>
         try {
-          job = runPi(path, supervisorPrompt(id, (detail as any)?.task ?? detail, path, branch), DISPATCH_STALE_MS)
+          job = runPi(path, supervisorPrompt(id, (detail as any)?.task ?? detail, path, branch), DISPATCH_STALE_MS, credentialsFile)
           await job.started
         } catch (err) {
           failed.add(key)
@@ -243,7 +251,7 @@ async function main(): Promise<number> {
         log("another Pi is handling these messages")
       } else {
         log(`handling ${ids.length} message(s)`)
-        const job = runPi(directory, inboxPrompt(freshMessages), INBOX_TIMEOUT_MS)
+        const job = runPi(directory, inboxPrompt(freshMessages), INBOX_TIMEOUT_MS, credentialsFile)
         const code = await job.started
           .then(() => job.done)
           .catch((err) => {

@@ -32,7 +32,7 @@ function workspace() {
   mkdirSync(join(root, "store"))
   writeFileSync(credentials, JSON.stringify({ office: url, client_id: "client-1", access_token: "access-poll", refresh_token: "refresh-poll", expires_at: Date.now() + 3_600_000 }))
   const stub = join(root, "pig")
-  writeFileSync(stub, `#!${process.execPath}\nrequire("fs").writeFileSync(require("path").join(${JSON.stringify(runs)}, String(Date.now()) + "-" + process.pid + ".json"), JSON.stringify({ cwd: process.cwd(), argv: process.argv.slice(2), child: process.env.AGENT_OFFICE_CHILD }))\nprocess.exit(Number(process.env.STUB_EXIT ?? 0))\n`)
+  writeFileSync(stub, `#!${process.execPath}\nrequire("fs").writeFileSync(require("path").join(${JSON.stringify(runs)}, String(Date.now()) + "-" + process.pid + ".json"), JSON.stringify({ cwd: process.cwd(), argv: process.argv.slice(2), child: process.env.AGENT_OFFICE_CHILD, credentials: process.env.AGENT_OFFICE_PI_CREDENTIALS }))\nprocess.exit(Number(process.env.STUB_EXIT ?? 0))\n`)
   chmodSync(stub, 0o755)
   const env: Record<string, string> = { ...(process.env as Record<string, string>), HOME: root, AGENT_OFFICE_URL: url, AGENT_OFFICE_PI_CREDENTIALS: credentials, AGENT_OFFICE_PI_BIN: stub }
   delete env.AGENT_OFFICE_TOKEN
@@ -44,9 +44,9 @@ function workspace() {
       child.stderr.on("data", (chunk) => (stderr += String(chunk)))
       child.on("close", (code) => resolve({ code, stderr }))
     })
-  const recorded = () => readdirSync(runs).sort().map((file) => JSON.parse(readFileSync(join(runs, file), "utf8")) as { cwd: string; argv: string[]; child?: string })
+  const recorded = () => readdirSync(runs).sort().map((file) => JSON.parse(readFileSync(join(runs, file), "utf8")) as { cwd: string; argv: string[]; child?: string; credentials?: string })
   const state = (kind: string) => join(root, "store", kind, "pi")
-  return { dir, poll, recorded, state }
+  return { root, dir, poll, recorded, state }
 }
 
 const reset = () => {
@@ -59,6 +59,28 @@ const reset = () => {
   office.calls.length = 0
 }
 const toolCalls = () => office.calls.filter((c) => c.path === "/mcp").map((c) => c.body.params.name)
+
+test("session selection pins poll and child, and unknown sessions fail closed", async () => {
+  reset()
+  const ws = workspace()
+  const config = join(ws.root, ".config", "agent-office", "pi")
+  const sessions = join(config, "sessions")
+  const agents = join(config, "agents")
+  mkdirSync(sessions, { recursive: true })
+  mkdirSync(agents, { recursive: true })
+  const session = "session-one"
+  const key = createHash("sha256").update(session).digest("hex").slice(0, 16)
+  writeFileSync(join(sessions, `${key}.json`), JSON.stringify({ agent: "selected" }))
+  const selected = join(agents, "selected.json")
+  writeFileSync(selected, JSON.stringify({ office: url, client_id: "c", access_token: "session-token", refresh_token: "r", expires_at: Date.now() + 3600000 }))
+  const result = await ws.poll(["--session", session])
+  assert.equal(result.code, 0, result.stderr)
+  assert.equal(office.calls.find((c) => c.path === "/mcp")?.auth, "Bearer session-token")
+  assert.equal(ws.recorded()[0].credentials, selected)
+  const missing = await ws.poll(["--session", "missing"])
+  assert.notEqual(missing.code, 0)
+  assert.match(missing.stderr, /no Office agent saved for session/)
+})
 
 test("not connected: a hint and a non-zero exit", async () => {
   const ws = workspace()

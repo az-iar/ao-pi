@@ -59,15 +59,20 @@ test("approving as a new agent does not overwrite the previous agent's token", a
     sendUserMessage() {},
   }
   agentOffice(api as any)
+  const ctx = { sessionManager: { getSessionId: () => "approval-session" }, isIdle: () => true, ui: { notify() {} } }
+  for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx)
+  await waitFor(() => existsSync(join(agents, "pi.json")))
   const approval = await tools.get("office_connect")!.execute("call", { agent_name: "new" })
   const link = approval.content[0].text.match(/https?:\/\/\S+/)?.[0]
   assert.ok(link, "the approval link is returned")
   await fetch(link, { redirect: "follow" })
-  await waitFor(() => existsSync(join(agents, "pi.json")))
+  await waitFor(() => JSON.parse(readFileSync(join(agents, "pi.json"), "utf8")).access_token !== "old-a")
 
   assert.equal(JSON.parse(readFileSync(join(agents, "a.json"), "utf8")).access_token, "old-a", "the old agent is untouched")
   assert.notEqual(JSON.parse(readFileSync(join(agents, "pi.json"), "utf8")).access_token, "old-a")
   assert.equal(JSON.parse(readFileSync(pointer, "utf8")).agent, "pi")
+  const sessionKey = createHash("sha256").update("approval-session").digest("hex").slice(0, 16)
+  assert.equal(JSON.parse(readFileSync(join(config, "sessions", `${sessionKey}.json`), "utf8")).agent, "pi")
   assert.deepEqual(readdirSync(config).filter((file) => file.startsWith("pending-")), [])
   for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, { isIdle: () => true, ui: { notify() {} } })
   await office.close()

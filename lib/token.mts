@@ -12,7 +12,7 @@
 import { parseArgs } from "node:util"
 import { basename, dirname, resolve } from "node:path"
 import { spawnSync } from "node:child_process"
-import { createBearer, resolveCredentials } from "./office.ts"
+import { createBearer, loadCredentials, resolveCredentials } from "./office.ts"
 
 function canonicalRoot(directory: string) {
   const git = spawnSync("git", ["-C", directory, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" })
@@ -20,10 +20,11 @@ function canonicalRoot(directory: string) {
   return basename(common) === ".git" ? dirname(common) : directory
 }
 
-const { values } = parseArgs({ options: { dir: { type: "string" } } })
+const { values } = parseArgs({ options: { dir: { type: "string" }, credentials: { type: "string" } } })
 const directory = resolve(values.dir ?? process.cwd())
 const resolved = resolveCredentials(directory, canonicalRoot(directory))
-const { bearer } = createBearer(() => resolved.credentialsFile, resolved.credentials)
+const file = values.credentials ?? resolved.credentialsFile
+const { bearer } = createBearer(() => file, values.credentials ? loadCredentials(file) : resolved.credentials)
 
 const token = await bearer().catch(() => undefined)
 if (!token) {

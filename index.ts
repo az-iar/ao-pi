@@ -56,6 +56,8 @@ import {
   releaseNotice,
   resolveCredentials,
   saveAgentPointers,
+  saveAgentPointer,
+  sessionPointerPath,
   saveCredentials,
   supervisorPrompt,
   taskID,
@@ -296,6 +298,7 @@ export default function agentOffice(pi: ExtensionAPI) {
   const resolved = resolveCredentials(directory, canonical)
   const { legacyCredentialsFile, pointerFile, repoPointerFile } = resolved
   let credentialsFile = resolved.credentialsFile
+  let sessionId: string | undefined
   const usingCredentialsOverride = Boolean(CREDENTIALS_OVERRIDE)
   const auth = createBearer(() => credentialsFile, resolved.credentials)
   const { call, checkin } = createClient(auth.bearer)
@@ -309,8 +312,11 @@ export default function agentOffice(pi: ExtensionAPI) {
       const current = loadCredentials(target)
       if (!current || !sameCredentials(current, auth.credentials)) saveCredentials(target, auth.credentials)
     }
-    credentialsFile = target
-    saveAgentPointers(directory, canonical, slug)
+    if (sessionId && loadAgentPointer(sessionPointerPath(sessionId)) !== slug) saveAgentPointer(sessionPointerPath(sessionId), slug)
+    if (credentialsFile !== target) {
+      credentialsFile = target
+      saveAgentPointers(directory, canonical, slug)
+    }
   }
   const dispatchDir = () => agentStateDir(legacyCredentialsFile, "dispatch", ownAgent?.slug ?? locationKey)
   const noticeDir = () => agentStateDir(legacyCredentialsFile, "notices", ownAgent?.slug ?? locationKey)
@@ -346,7 +352,7 @@ export default function agentOffice(pi: ExtensionAPI) {
     }
     return whichOnPath("node") ?? whichOnPath("bun") ?? process.execPath
   }
-  const bearerCommand = () => `!${shq(tokenRuntime())} ${shq(TOKEN_SCRIPT)} --dir ${shq(directory)}`
+  const bearerCommand = () => `!${shq(tokenRuntime())} ${shq(TOKEN_SCRIPT)} --credentials ${shq(credentialsFile)}`
   const clearMcpTimer = () => {
     if (mcpTimer) clearTimeout(mcpTimer)
     mcpTimer = undefined
@@ -492,7 +498,7 @@ export default function agentOffice(pi: ExtensionAPI) {
       : `The office MCP server is not registered${lastMcpError ? `: ${lastMcpError}` : ""}.`
     const summaryLine = `Connected to Agent Office as @${me.agent?.slug} (${me.agent?.name}). Open tasks: ${pending.open_tasks?.length ?? 0}, unclaimed team tasks: ${pending.unclaimed_team_tasks?.length ?? 0}, unread messages: ${pending.unread_messages?.length ?? 0}. ${mcpLine}`
     if (!existsSync(POLL_SCRIPT)) return summaryLine
-    return `${summaryLine}\nTo keep handling Office work while Pi is closed, add this line to the crontab (crontab -e), or ask to have it added:\n${cronLine(directory, POLL_SCRIPT)}`
+    return `${summaryLine}\nTo keep handling Office work while Pi is closed, add this line to the crontab (crontab -e), or ask to have it added:\n${cronLine(directory, POLL_SCRIPT, process.env.PATH, process.env.AGENT_OFFICE_TOKEN ? undefined : sessionId, usingCredentialsOverride ? credentialsFile : undefined)}`
   }
 
   // The approval in flight. A loopback callback finishes it in the background
@@ -566,7 +572,7 @@ export default function agentOffice(pi: ExtensionAPI) {
       const { path, branch } = await addWorktree(repo, id)
       notice(`Agent Office: dispatching task ${id} to a worker in ${path} (${branch}).`)
       const prompt = supervisorPrompt(id, task, path, branch)
-      const result = await run(PI_BIN, ["-e", HERE, "--print", prompt], path, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1" }).catch((err) => {
+      const result = await run(PI_BIN, ["-e", HERE, "--print", prompt], path, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile }).catch((err) => {
         warn("could not start the worker", { task: id, error: String(err) })
         return undefined
       })
@@ -687,6 +693,14 @@ export default function agentOffice(pi: ExtensionAPI) {
   // --- status reporting on this session's own streaming ---
   pi.on("session_start", async (_event, ctx) => {
     lastCtx = ctx
+    sessionId = ctx.sessionManager?.getSessionId()
+    if (!usingCredentialsOverride && sessionId) {
+      const savedAgent = loadAgentPointer(sessionPointerPath(sessionId))
+      if (savedAgent) {
+        credentialsFile = agentCredentialsPath(savedAgent)
+        auth.credentials = loadCredentials(credentialsFile)
+      }
+    }
     await connectMcp()
     if (pollingAllowed && !pollTimer) {
       pollTimer = setInterval(() => void poll(), pollInterval)
@@ -791,6 +805,7 @@ export default function agentOffice(pi: ExtensionAPI) {
     return JSON.stringify(
       {
         location: directory,
+        sessionId,
         canonical,
         credentialsFile,
         tokenStorage: usingCredentialsOverride ? "override" : "agent",
