@@ -44,7 +44,6 @@ import {
   cronLine,
   fromOthers,
   inboxPrompt,
-  inHerdrWorktree,
   itemKey,
   loadAgentPointer,
   loadCredentials,
@@ -688,7 +687,7 @@ export default function agentOffice(pi: ExtensionAPI) {
   const configuredPoll = process.env.AGENT_OFFICE_POLL_MS?.trim()
   const configuredPollNumber = configuredPoll ? Number(configuredPoll) : NaN
   const pollInterval = Number.isFinite(configuredPollNumber) ? Math.max(configuredPollNumber, 1_000) : DEFAULT_POLL_MS
-  const pollingAllowed = !isChild && !onTaskBranch(directory) && !inHerdrWorktree(directory)
+  const pollingAllowed = !isChild && !onTaskBranch(directory)
 
   // --- status reporting on this session's own streaming ---
   pi.on("session_start", async (_event, ctx) => {

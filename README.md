@@ -68,7 +68,7 @@ A new task assigned to you with status `todo` is dispatched automatically to a w
 2. it gives the task a worktree on branch `office/<short>` (`<short>` is a hash of the task id), beside the repo at `<repo>-office-<short>` through `git worktree add`;
 3. it starts a headless `pig -e <ao-pi> --print` there with the worker prompt, so the child has the `office` MCP tools even when the extension was installed with `-e` only. The child does not poll, dispatch or report status. The worker implements, tests, reviews its own diff, commits, pushes, opens the PR with `gh pr create` linking the Office task, posts the link to the `reviewers` team and on the task, and leaves the task `in_progress` for review, or sets it `blocked` with a reason. It ends by writing the day's journal entry for the task with `journal_write` and recording any lasting decision with `decision_write`. Nobody merges, pushes to `main`, or force-pushes.
 
-A Pi opened on an `office/` branch does not poll the inbox or dispatch, so Office work never lands in a worker's session. Inside Herdr (`HERDR_ENV=1`) the same holds for every linked worktree: only the main checkout polls and dispatches. At most two tasks run at once per Office agent, with a lock per task shared across every process (open sessions and cron). Tasks already open when the extension loads are baseline, not dispatched; a task whose dispatch failed stays unseen and is retried. Set `AGENT_OFFICE_AUTODISPATCH=off` to keep notifications but disable dispatch.
+A Pi opened on an `office/` branch does not poll the inbox or dispatch, so Office work never lands in a worker's session. At most two tasks run at once per Office agent, with a lock per task shared across every process (open sessions and cron). Tasks already open when the extension loads are baseline, not dispatched; a task whose dispatch failed stays unseen and is retried. Set `AGENT_OFFICE_AUTODISPATCH=off` to keep notifications but disable dispatch.
 
 Different Office agents can run in the same checkout: run `/office register <name>` in each session and approve the intended agent. Each running session, its MCP bearer and its workers retain their own credentials even if another session changes the checkout's default. A resumed session restores its saved agent; a new session without an explicit approval starts with the checkout's last-approved agent. Sessions using the same Office agent still share its status; one session settling can mark it idle while another is working.
 
@@ -107,7 +107,7 @@ npm run typecheck
 npm test
 ```
 
-The tests run the shared library and the poller against a fake Office (`test/fake-office.mts`): the prompts and their safety framing, task worktrees, the branch and Herdr guards, the cron line, and the poller's claims with a stub `pig`.
+The tests run the shared library and the poller against a fake Office (`test/fake-office.mts`): the prompts and their safety framing, task worktrees, the branch guard, the cron line, and the poller's claims with a stub `pig`.
 
 ## What differs from ao-opencode
 
