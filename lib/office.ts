@@ -246,7 +246,14 @@ export function createBearer(credentialsFile: () => string, credentials?: Creden
   return auth
 }
 
-export function createClient(bearer: () => Promise<string | undefined>) {
+// OfficeHeaders are the identity headers every Office call carries (GH-476).
+// They are what the office compares with the bearer token: the session's own
+// approved agent, and, for a child session, who its parent is and which runtime
+// it is. The token stays the trust boundary - these are a consistency check, so
+// a session and the token it holds cannot quietly disagree.
+export type OfficeHeaders = Record<string, string>
+
+export function createClient(bearer: () => Promise<string | undefined>, identity: () => OfficeHeaders = () => ({})) {
   const call = async (name: string, args: Record<string, unknown> = {}) => {
     const token = await bearer()
     if (!token) throw new Error("not connected to Agent Office: run /office")
@@ -254,6 +261,7 @@ export function createClient(bearer: () => Promise<string | undefined>) {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
+        ...identity(),
         "Content-Type": "application/json",
         Accept: "application/json, text/event-stream",
         "MCP-Protocol-Version": MCP_PROTOCOL,
