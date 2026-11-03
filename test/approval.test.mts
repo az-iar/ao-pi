@@ -6,6 +6,10 @@ import { join } from "node:path"
 import { test } from "node:test"
 import { fakeOffice } from "./fake-office.mts"
 
+// Never open a real browser from a test: the opener is the one boundary that
+// reaches outside this process (az-iar/ao-pi#10).
+process.env.AGENT_OFFICE_OPEN_BROWSER = "off"
+
 async function waitFor(check: () => boolean, timeoutMs = 5_000) {
   const start = Date.now()
   while (!check()) {

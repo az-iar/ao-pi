@@ -165,7 +165,18 @@ async function registerClient(callback: string, clientName: string): Promise<str
   return body.client_id
 }
 
-function openBrowser(url: string) {
+// openBrowser opens the approval URL in the person's browser. It is the one place
+// this extension reaches outside the process, so it is also the boundary the tests
+// stub: with AGENT_OFFICE_OPEN_BROWSER=off nothing is spawned at all, which is what
+// stops an approval test from launching a real browser on the host (az-iar/ao-pi#10,
+// where a suite run left hundreds of stray firefox processes).
+export function browserOpeningAllowed(): boolean {
+  const mode = (process.env.AGENT_OFFICE_OPEN_BROWSER ?? "").trim().toLowerCase()
+  return mode !== "off" && mode !== "0" && mode !== "false" && mode !== "no"
+}
+
+export function openBrowser(url: string) {
+  if (!browserOpeningAllowed()) return
   try {
     const [cmd, args] = process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : process.platform === "darwin" ? ["open", [url]] : ["xdg-open", [url]]
     spawn(cmd, args, { detached: true, stdio: "ignore" }).on("error", () => {}).unref()

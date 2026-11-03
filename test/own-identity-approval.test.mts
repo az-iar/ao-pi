@@ -2,6 +2,10 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { harness } from "./own-identity-harness.mts"
 
+// Never open a real browser from a test: the opener is the one boundary that
+// reaches outside this process (az-iar/ao-pi#10).
+process.env.AGENT_OFFICE_OPEN_BROWSER = "off"
+
 // GH-476
 test("a fresh session that approves then owns an identity: it checks in and registers the MCP", async () => {
   const h = await harness({})
