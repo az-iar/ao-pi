@@ -8,6 +8,10 @@ import { after, test, type TestContext } from "node:test"
 import { fileURLToPath } from "node:url"
 import { fakeOffice } from "./fake-office.mts"
 
+// Never open a real browser from a test: the opener is the one boundary that
+// reaches outside this process (az-iar/ao-pi#10).
+process.env.AGENT_OFFICE_OPEN_BROWSER = "off"
+
 // index.ts resolves the repo root from `require`, which Pi's loader provides and
 // plain node ESM does not. Shim it, so the extension here resolves a worktree
 // against the main checkout exactly as it does in Pi.
