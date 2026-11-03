@@ -9,6 +9,9 @@
 //                      tasks go to a worker Pi in a worktree, up to two tasks
 //                      at a time per Office agent. Headless children do not
 //                      poll, dispatch, or report status.
+//   in a worktree      only once /office has run in that worktree: a linked
+//                      worktree with no agent of its own takes on no Office
+//                      identity, so it never acts as the main checkout.
 //
 //   AGENT_OFFICE_URL                dashboard origin, default https://office.byma.tech
 //   AGENT_OFFICE_TOKEN              an agent API token instead of OAuth (optional)
@@ -46,6 +49,7 @@ import {
   fromOthers,
   inboxPrompt,
   itemKey,
+  isUnconnectedWorktree,
   loadAgentPointer,
   loadCredentials,
   MAX_DISPATCHES,
@@ -161,7 +165,18 @@ async function registerClient(callback: string, clientName: string): Promise<str
   return body.client_id
 }
 
-function openBrowser(url: string) {
+// openBrowser opens the approval URL in the person's browser. It is the one place
+// this extension reaches outside the process, so it is also the boundary the tests
+// stub: with AGENT_OFFICE_OPEN_BROWSER=off nothing is spawned at all, which is what
+// stops an approval test from launching a real browser on the host (az-iar/ao-pi#10,
+// where a suite run left hundreds of stray firefox processes).
+export function browserOpeningAllowed(): boolean {
+  const mode = (process.env.AGENT_OFFICE_OPEN_BROWSER ?? "").trim().toLowerCase()
+  return mode !== "off" && mode !== "0" && mode !== "false" && mode !== "no"
+}
+
+export function openBrowser(url: string) {
+  if (!browserOpeningAllowed()) return
   try {
     const [cmd, args] = process.platform === "win32" ? ["cmd", ["/c", "start", "", url]] : process.platform === "darwin" ? ["open", [url]] : ["xdg-open", [url]]
     spawn(cmd, args, { detached: true, stdio: "ignore" }).on("error", () => {}).unref()
@@ -300,7 +315,19 @@ export default function agentOffice(pi: ExtensionAPI) {
   let credentialsFile = resolved.credentialsFile
   let sessionId: string | undefined
   const usingCredentialsOverride = Boolean(CREDENTIALS_OVERRIDE)
-  const auth = createBearer(() => credentialsFile, resolved.credentials)
+  // Set once an approval in this process hands over a token: the worktree is
+  // connected from that moment, before its own pointer file is written, and a
+  // pointer written from that approval is the worktree's own.
+  let approvedHere = false
+  // Asked each time rather than once: /office here writes the worktree's own
+  // pointer, and from that moment the session is connected like any other.
+  const noOwnCredentials = () => !approvedHere && isUnconnectedWorktree(directory) && !usingCredentialsOverride
+  // An explicit token or credentials file is handed over on purpose (dispatched
+  // workers and children), so it keeps working in a worktree nobody connected.
+  const unconnected = () => noOwnCredentials() && !process.env.AGENT_OFFICE_TOKEN?.trim()
+  // An unconnected worktree has no token file to read, not even the one the main
+  // checkout shares, so the bearer never falls back to it.
+  const auth = createBearer(() => (noOwnCredentials() ? undefined : credentialsFile), resolved.credentials)
   // ownedBearer is the only door to identity: while the session owns none it
   // answers nothing, so checkin, call, the MCP registration and office_connect
   // all fail closed instead of each resolving the host's credentials itself.
@@ -369,7 +396,11 @@ export default function agentOffice(pi: ExtensionAPI) {
     if (sessionId && loadAgentPointer(sessionPointerPath(sessionId)) !== slug) saveAgentPointer(sessionPointerPath(sessionId), slug)
     if (credentialsFile !== target) {
       credentialsFile = target
-      saveAgentPointers(directory, canonical, slug)
+      // Only an approval in this process makes a worktree's pointer its own; a
+      // plain poll or a token handed in the environment switches the file this
+      // session reads, and saveAgentPointers drops the write inside a linked
+      // worktree, so no identity outlives the token that carried it.
+      saveAgentPointers(directory, canonical, slug, approvedHere ? "office" : undefined)
     }
   }
   const dispatchDir = () => agentStateDir(legacyCredentialsFile, "dispatch", ownAgent?.slug ?? locationKey)
@@ -424,6 +455,9 @@ export default function agentOffice(pi: ExtensionAPI) {
   }
   const connectMcp = async (force = false) => {
     if (mcpRegistered && !force) return
+    // No office tools in an unconnected worktree: they would post, mark read
+    // and update tasks as the main checkout's agent. /office here connects it.
+    if (unconnected()) return
     let token: string | undefined
     try {
       token = await ownedBearer()
@@ -469,7 +503,7 @@ export default function agentOffice(pi: ExtensionAPI) {
   // that boots owning an identity, and one that approves mid-session (#476
   // follow-up). poll() itself fails closed while the session owns nothing.
   function startPolling() {
-    if (!pollingAllowed || pollTimer) return
+    if (!pollAllowed() || pollTimer) return
     pollTimer = setInterval(() => void poll(), pollInterval)
     pollTimer.unref()
     void poll()
@@ -624,6 +658,12 @@ export default function agentOffice(pi: ExtensionAPI) {
         startPolling()
         try {
           return await connectedSummary(true)
+        } catch (err) {
+          // The connection did not finish (the checkin failed, the MCP server
+          // could not be registered): drop back to unconnected, so a worktree
+          // never falls back to the token file it shares with the main checkout.
+          approvedHere = false
+          throw err
         } finally {
           if (pendingFile) {
             try {
@@ -789,13 +829,17 @@ export default function agentOffice(pi: ExtensionAPI) {
   const configuredPoll = process.env.AGENT_OFFICE_POLL_MS?.trim()
   const configuredPollNumber = configuredPoll ? Number(configuredPoll) : NaN
   const pollInterval = Number.isFinite(configuredPollNumber) ? Math.max(configuredPollNumber, 1_000) : DEFAULT_POLL_MS
-  const pollingAllowed = !isChild && !onTaskBranch(directory)
+  const pollAllowed = () => !isChild && !onTaskBranch(directory) && !unconnected()
 
   // --- status reporting on this session's own streaming ---
   pi.on("session_start", async (_event, ctx) => {
     lastCtx = ctx
     sessionId = ctx.sessionManager?.getSessionId()
-    if (!usingCredentialsOverride && sessionId) {
+    // A session pointer records an approval made somewhere else and names that
+    // agent's token file, which in an unconnected worktree is the main
+    // checkout's. Such a worktree connects only through its own marked pointer,
+    // so the session pointer is not read there at all.
+    if (!usingCredentialsOverride && sessionId && !isUnconnectedWorktree(directory)) {
       const savedAgent = loadAgentPointer(sessionPointerPath(sessionId))
       if (savedAgent) {
         credentialsFile = agentCredentialsPath(savedAgent)
@@ -832,7 +876,15 @@ export default function agentOffice(pi: ExtensionAPI) {
     // directory pointer or legacy credentials, which do not count by themselves.
     // Record the decision instead of silently doing nothing; /office approves.
     if (!ownsIdentity) {
-      notice(`Agent Office: this session (${sessionId ?? "unknown"}) has no Office identity of its own yet. Run /office to approve one.`, "info")
+      // In a linked worktree the gap is the worktree's, not the session's: the
+      // main checkout beside it is often connected, and it is exactly the agent
+      // this worktree must not speak as.
+      notice(
+        unconnected()
+          ? "Agent Office: this git worktree has no Office agent of its own, so it will not act as the main checkout's. Run /office here to connect it."
+          : `Agent Office: this session (${sessionId ?? "unknown"}) has no Office identity of its own yet. Run /office to approve one.`,
+        "info",
+      )
       return
     }
     await connectMcp()
@@ -949,7 +1001,8 @@ export default function agentOffice(pi: ExtensionAPI) {
         clientName,
         mode: dispatchMode,
         pollInterval,
-        pollingAllowed,
+        pollingAllowed: pollAllowed(),
+        unconnected: unconnected(),
         mcpRegistered,
         working,
         streaming,

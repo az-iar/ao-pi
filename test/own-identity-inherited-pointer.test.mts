@@ -2,6 +2,10 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { harness } from "./own-identity-harness.mts"
 
+// Never open a real browser from a test: the opener is the one boundary that
+// reaches outside this process (az-iar/ao-pi#10).
+process.env.AGENT_OFFICE_OPEN_BROWSER = "off"
+
 // GH-476: a session with no identity but an inherited directory-pointer credential
 // (the incident shape) is offered an approval, not errored at, and never acts.
 test("office_connect and /office with no args offer an approval link to a session without an identity", async () => {

@@ -8,6 +8,10 @@ export function fakeOffice() {
   const calls: Call[] = []
   const state = {
     workStatus: "working",
+    // The agent this Office answers checkins as; tests set it to the agent they
+    // connected the workspace as.
+    agentSlug: "pi",
+    agentName: "Pi",
     tokens: 0,
     openTasks: [{ id: "task-open-1", title: "Open task" }],
     unclaimedTasks: [] as any[],
@@ -58,7 +62,7 @@ export function fakeOffice() {
       if (body.method === "tools/call") {
         if (body.params.arguments?.status) state.workStatus = body.params.arguments.status
         const data = {
-          agent: { slug: "pi", name: "Pi", work_status: state.workStatus },
+          agent: { slug: state.agentSlug, name: state.agentName, work_status: state.workStatus },
           pending: { open_tasks: state.openTasks, unclaimed_team_tasks: state.unclaimedTasks, unread_messages: state.unreadMessages },
           rules: { etag: "etag-1", effective: [], always: [], projects: [], layers: [] },
         }

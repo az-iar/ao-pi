@@ -56,7 +56,9 @@ export function taskID(item: any): string {
   return String(item?.id ?? item?.task_id ?? item?.slug ?? itemKey(item, "task"))
 }
 
-// One token per repo by default. Worktrees share the canonical project root;
+// One token per repo by default, keyed by the canonical root the caller passes:
+// that is the main checkout for a linked worktree too, so both name the same
+// per-repo file -- an unconnected worktree simply never reads it.
 // `AGENT_OFFICE_TOKEN_SCOPE=folder` keys by the loaded directory instead.
 export function credentialsPath(directory: string, canonical?: string, override = CREDENTIALS_OVERRIDE, scope = process.env.AGENT_OFFICE_TOKEN_SCOPE ?? "repo"): string {
   if (override) return override
@@ -98,6 +100,65 @@ export function loadAgentPointer(path: string): string | undefined {
   }
 }
 
+// How a workspace pointer was written. Only a pointer written on purpose counts
+// in a linked worktree: the plugin before this rule wrote the worktree's own
+// pointer from the repo-pointer fallback on every poll, so an unmarked pointer
+// there names the main checkout's agent rather than an agent anyone connected
+// this worktree as. The main checkout and plain directories accept either.
+export type PointerVia = "office" | "dispatch"
+
+type Pointer = { agent?: string; via?: string }
+
+function pointerRecord(path: string): Pointer | undefined {
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as Pointer
+  } catch {
+    return undefined
+  }
+}
+
+const viaOf = (record: Pointer | undefined): PointerVia | undefined =>
+  record?.via === "office" || record?.via === "dispatch" ? record.via : undefined
+
+// The slug a pointer names, but only when the pointer was written on purpose.
+export function loadMarkedAgentPointer(path: string): string | undefined {
+  const record = pointerRecord(path)
+  if (!viaOf(record) || typeof record?.agent !== "string") return undefined
+  return record.agent
+}
+
+// The root of the linked worktree that holds `directory`, or undefined for the
+// main checkout, a subdirectory of it, or a directory outside git: there
+// `--absolute-git-dir` and the common dir are the same path. Memoised, because
+// a checkout's git layout does not move under a running process.
+const worktreeRoots = new Map<string, string | undefined>()
+export function linkedWorktreeRoot(directory: string): string | undefined {
+  const cached = worktreeRoots.get(directory)
+  if (cached !== undefined || worktreeRoots.has(directory)) return cached
+  const git = spawnSync("git", ["-C", directory, "rev-parse", "--path-format=absolute", "--absolute-git-dir", "--git-common-dir", "--show-toplevel"], {
+    encoding: "utf8",
+  })
+  const [gitDir, commonDir, root] = git.status === 0 ? git.stdout.trim().split("\n").map((line) => line.trim()) : []
+  const linked = Boolean(gitDir && commonDir && root && gitDir !== commonDir)
+  worktreeRoots.set(directory, linked ? root : undefined)
+  return linked ? root : undefined
+}
+
+// A linked worktree nobody connected: it has no agent pointer of its own, so it
+// must not act as the agent of the main checkout it branches from. Only a marked
+// pointer counts here, so a worktree the old plugin gave an implicit pointer to
+// fails closed until someone runs /office in it again. It resolves no
+// credentials at all -- no repo pointer, no token file shared with the main
+// checkout -- however it was started. Running /office there writes the
+// worktree's own pointer and connects it. Whether a workspace may poll and
+// register Office tools at all is the caller's decision, because an environment
+// token or an explicit credentials file hands one over on purpose.
+export function isUnconnectedWorktree(directory: string): boolean {
+  const root = linkedWorktreeRoot(directory)
+  if (!root) return false
+  return !loadMarkedAgentPointer(agentPointerPath(root))
+}
+
 // Small files written under ~/.config must never be observed half-written by
 // another Pi process, and an existing file keeps its old mode without chmod.
 function writePrivateJson(path: string, value: unknown) {
@@ -116,16 +177,30 @@ function writePrivateJson(path: string, value: unknown) {
   }
 }
 
-export function saveAgentPointer(path: string, slug: string) {
-  writePrivateJson(path, { agent: slug })
+export function saveAgentPointer(path: string, slug: string, via?: PointerVia) {
+  writePrivateJson(path, via ? { agent: slug, via } : { agent: slug })
 }
 
 // The workspace pointer is keyed by the exact cwd; the repo pointer by the
 // canonical root. Save both so approving in a subdirectory also connects the
-// repository root, rather than only the subdirectory that ran /office.
-export function saveAgentPointers(directory: string, canonical: string | undefined, slug: string) {
-  const paths = new Set([agentPointerPath(directory), agentPointerPath(canonical ?? directory)])
-  for (const path of paths) if (loadAgentPointer(path) !== slug) saveAgentPointer(path, slug)
+// repository root, rather than only the subdirectory that ran /office. In a
+// linked worktree the repo pointer belongs to the main checkout, so connecting
+// the worktree writes the worktree's own pointer only (at its root too, so a
+// subdirectory of the worktree resolves the same); the main checkout keeps the
+// agent it was connected as. A linked worktree's pointer is written only on
+// purpose -- an approval in the worktree, or a dispatcher adopting it -- and
+// every other write there is dropped: a poll or an identity handed in through
+// the environment must not leave a pointer behind that outlives it.
+export function saveAgentPointers(directory: string, canonical: string | undefined, slug: string, via?: PointerVia) {
+  const worktreeRoot = linkedWorktreeRoot(directory)
+  if (worktreeRoot && !via) return
+  const paths = new Set([agentPointerPath(directory)])
+  if (worktreeRoot) paths.add(agentPointerPath(worktreeRoot))
+  else if (canonical) paths.add(agentPointerPath(canonical))
+  for (const path of paths) {
+    const current = pointerRecord(path)
+    if (current?.agent !== slug || viaOf(current) !== via) saveAgentPointer(path, slug, via)
+  }
 }
 
 export function saveCredentials(path: string, c: Credentials) {
@@ -133,15 +208,32 @@ export function saveCredentials(path: string, c: Credentials) {
 }
 
 // The workspace's agent pointer names the agent's token file; without one the
-// legacy per-repo file is used. The override file replaces both.
+// legacy per-repo file is used. The override file replaces both. An unconnected
+// worktree resolves nothing: both fallbacks belong to the main checkout. Inside
+// a linked worktree the worktree's own marked pointer is the only one read --
+// never the main checkout's repo pointer, and not an unmarked pointer of an
+// older version left at the worktree or at a subdirectory of it.
 export function resolveCredentials(directory: string, canonical?: string) {
+  const worktreeRoot = linkedWorktreeRoot(directory)
   const legacyCredentialsFile = credentialsPath(directory, canonical)
-  const pointerFile = agentPointerPath(directory)
+  const pointerFile = worktreeRoot ? agentPointerPath(worktreeRoot) : agentPointerPath(directory)
   const repoPointerFile = agentPointerPath(canonical ?? directory)
+  if (!CREDENTIALS_OVERRIDE && isUnconnectedWorktree(directory)) {
+    // No token file is this worktree's to read, and naming the legacy path here
+    // would point status, a dispatched child's --credentials override and the
+    // MCP bearer at the token file the main checkout shares. Poison the file
+    // instead: nothing writes it, and a child handed it fails closed on its own
+    // token rather than acting as the main checkout's agent. State directories
+    // still come from the legacy path, so the dispatch cap stays per agent.
+    const credentialsFile = join(CREDENTIALS_DIR, "unconnected", `${workspaceKey(linkedWorktreeRoot(directory) ?? directory)}.json`)
+    return { legacyCredentialsFile, pointerFile, repoPointerFile, credentialsFile, credentials: undefined, unconnected: true }
+  }
   const pointedAgent =
     CREDENTIALS_OVERRIDE
       ? undefined
-      : loadAgentPointer(pointerFile) ?? (repoPointerFile !== pointerFile ? loadAgentPointer(repoPointerFile) : undefined)
+      : worktreeRoot
+        ? loadMarkedAgentPointer(pointerFile)
+        : loadAgentPointer(pointerFile) ?? (repoPointerFile !== pointerFile ? loadAgentPointer(repoPointerFile) : undefined)
   let credentialsFile = pointedAgent ? agentCredentialsPath(pointedAgent) : legacyCredentialsFile
   let credentials = loadCredentials(credentialsFile)
   if (!credentials && !pointedAgent) {
@@ -151,7 +243,16 @@ export function resolveCredentials(directory: string, canonical?: string) {
       credentialsFile = legacyCredentialsFile
     }
   }
-  return { legacyCredentialsFile, pointerFile, repoPointerFile, credentialsFile, credentials }
+  return { legacyCredentialsFile, pointerFile, repoPointerFile, credentialsFile, credentials, unconnected: false }
+}
+
+// The file a caller should read tokens from. An unconnected worktree has none:
+// the file it would read is the main checkout's. An explicit file (a
+// --credentials argument, a session's agent, the override) is handed over on
+// purpose and still wins.
+export function credentialsFileFor(resolved: ReturnType<typeof resolveCredentials>, explicit?: string): string | undefined {
+  if (explicit) return explicit
+  return resolved.unconnected ? undefined : resolved.credentialsFile
 }
 
 // Claims, dispatch locks and poller state live beside the credentials, one
@@ -195,22 +296,25 @@ async function acquireRefreshLock(lock: string) {
 // The bearer for every Office call: the API token from the environment, or
 // the OAuth access token. Re-read the shared file so worktree agents see a
 // token another process refreshed, and refresh under a cross-process lock
-// because the refresh token rotates.
-export function createBearer(credentialsFile: () => string, credentials?: Credentials) {
+// because the refresh token rotates. No credentials file at all (an unconnected
+// worktree) means no bearer unless the environment names one.
+export function createBearer(credentialsFile: () => string | undefined, credentials?: Credentials) {
   let refreshing: Promise<Credentials> | undefined
   const auth: { credentials?: Credentials; bearer: () => Promise<string | undefined> } = {
     credentials,
     bearer: async () => {
       if (process.env.AGENT_OFFICE_TOKEN) return process.env.AGENT_OFFICE_TOKEN
-      auth.credentials ??= loadCredentials(credentialsFile())
+      const file = credentialsFile()
+      if (!file) return undefined
+      auth.credentials ??= loadCredentials(file)
       if (!auth.credentials) return undefined
-      const disk = loadCredentials(credentialsFile())
+      const disk = loadCredentials(file)
       if (disk && disk.access_token !== auth.credentials.access_token && disk.expires_at > Date.now()) auth.credentials = disk
       if (auth.credentials.expires_at - Date.now() < REFRESH_EARLY_MS) {
         refreshing ??= (async () => {
-          const release = await acquireRefreshLock(`${credentialsFile()}.lock`)
+          const release = await acquireRefreshLock(`${file}.lock`)
           try {
-            const latest = loadCredentials(credentialsFile())
+            const latest = loadCredentials(file)
             if (latest && latest.expires_at - Date.now() >= REFRESH_EARLY_MS) {
               auth.credentials = latest
               return latest
@@ -219,11 +323,11 @@ export function createBearer(credentialsFile: () => string, credentials?: Creden
             try {
               const next = await tokenRequest(base.client_id, { grant_type: "refresh_token", refresh_token: base.refresh_token })
               auth.credentials = next
-              saveCredentials(credentialsFile(), next)
+              saveCredentials(file, next)
               return next
             } catch (err) {
               // Another process may have rotated the token between our read and refresh.
-              const raced = loadCredentials(credentialsFile())
+              const raced = loadCredentials(file)
               if (raced && raced.access_token !== base.access_token && raced.expires_at > Date.now()) {
                 auth.credentials = raced
                 return raced
