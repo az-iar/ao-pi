@@ -29,6 +29,7 @@ import {
   claimTask,
   createBearer,
   createClient,
+  credentialsFileFor,
   DISPATCH_STALE_MS,
   fromOthers,
   inboxPrompt,
@@ -156,12 +157,28 @@ async function main(): Promise<number> {
 
   const resolved = resolveCredentials(directory, canonicalRoot(directory))
   if (values.session && values.credentials) throw new Error("choose --session or --credentials, not both")
-  const sessionAgent = values.session ? loadAgentPointer(sessionPointerPath(values.session)) : undefined
-  if (values.session && !sessionAgent) throw new Error(`no Office agent saved for session ${values.session}`)
+  // A session pointer is not an identity an unconnected worktree may act on. The
+  // old plugin wrote one there on every poll, through the repo-pointer fallback,
+  // so it names an approval made in the main checkout. Decide that before the
+  // pointer is read, so no later use can name that agent either: credentialsFile
+  // is what a dispatched or inbox `pig` gets as AGENT_OFFICE_PI_CREDENTIALS, and
+  // handing it the main checkout's agent would undo the refusal for the worker
+  // even while the poller itself runs as the token.
+  const sessionRefused = Boolean(values.session) && resolved.unconnected
+  const sessionAgent = values.session && !sessionRefused ? loadAgentPointer(sessionPointerPath(values.session)) : undefined
+  if (values.session && !sessionRefused && !sessionAgent) throw new Error(`no Office agent saved for session ${values.session}`)
   const credentialsFile = values.credentials ? resolve(values.credentials) : sessionAgent ? agentCredentialsPath(sessionAgent) : resolved.credentialsFile
-  const { bearer } = createBearer(() => credentialsFile, values.credentials || values.session ? loadCredentials(credentialsFile) : resolved.credentials)
+  // A refused session is no explicit file: without AGENT_OFFICE_TOKEN this exits
+  // below as a poller with no --session does, and with one it runs as that token,
+  // handing its workers the same file an unchanged poller there would.
+  const explicitFile = values.credentials ? credentialsFile : sessionAgent ? credentialsFile : undefined
+  const { bearer } = createBearer(() => credentialsFileFor(resolved, explicitFile), explicitFile ? loadCredentials(explicitFile) : resolved.credentials)
   if (!(await bearer())) {
-    log(`not connected for ${directory}: run /office in Pi first, or set AGENT_OFFICE_TOKEN`)
+    log(
+      resolved.unconnected
+        ? `${directory} is a git worktree with no Office agent of its own; run /office there to connect it, or set AGENT_OFFICE_TOKEN`
+        : `not connected for ${directory}: run /office in Pi first, or set AGENT_OFFICE_TOKEN`,
+    )
     return 2
   }
   const { call, checkin } = createClient(bearer)

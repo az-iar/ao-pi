@@ -46,6 +46,8 @@ The `office` MCP server authenticates with a bearer command (`lib/token.mts`): P
 
 The loopback callback starts at `AGENT_OFFICE_CALLBACK_PORT` and tries the next 19 ports if it is busy. On a remote or headless machine, open the link in any browser and approve. The browser then lands on a `http://127.0.0.1:.../callback?...` page that does not load: copy that full address and run `/office <address>`, or paste it into the chat for the model to pass to `office_connect`.
 
+A linked git worktree (`git worktree add`) has no Office identity of its own until `/office` runs in it: until then it resolves no credentials at all, neither the main checkout's repo pointer nor the token file they share, so it gets no `office` MCP tools, no polling, no notices and no status writes. Only a pointer `/office` wrote in that worktree counts; one an older version left there implicitly, from the repo-pointer fallback, is ignored, so run `/office` in such a worktree once. Running `/office` in the worktree connects that worktree as its own agent and leaves the main checkout as it was, a dispatched worker is handed its identity by the dispatcher rather than by a pointer, and `AGENT_OFFICE_TOKEN` or `AGENT_OFFICE_PI_CREDENTIALS` overrides this as it does anywhere else. `AGENT_OFFICE_TOKEN_SCOPE=global` does not exempt a linked worktree: the global token file is the main checkout's as much as the per-repo one. A cron line's `--session <id>` mapping is refused there for the same reason, because an older version saved one in a worktree from the repo-pointer fallback; `--credentials` and `AGENT_OFFICE_TOKEN` still work there.
+
 ## While running
 
 | Pi | Office |
@@ -107,7 +109,7 @@ npm run typecheck
 npm test
 ```
 
-The tests run the shared library and the poller against a fake Office (`test/fake-office.mts`): the prompts and their safety framing, task worktrees, the branch guard, the cron line, and the poller's claims with a stub `pig`.
+The tests run the shared library and the poller against a fake Office (`test/fake-office.mts`): the prompts and their safety framing, task worktrees, the branch guard, the cron line, worktree identity, and the poller's claims with a stub `pig`.
 
 ## What differs from ao-opencode
 
