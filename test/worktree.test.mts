@@ -136,12 +136,12 @@ const tokenHelper = (directory: string, env: Record<string, string> = {}) =>
     encoding: "utf8",
   })
 
-const poller = (directory: string) => {
+const poller = (directory: string, args: string[] = []) => {
   const pollScript = fileURLToPath(new URL("../poll.ts", import.meta.url))
   const env: Record<string, string> = { ...(process.env as Record<string, string>), HOME: home, AGENT_OFFICE_URL: url, AGENT_OFFICE_POLL_MS: "60000" }
   delete env.AGENT_OFFICE_TOKEN
   delete env.AGENT_OFFICE_PI_CREDENTIALS
-  return spawnSync(process.execPath, ["--experimental-strip-types", "--disable-warning=ExperimentalWarning", pollScript, "--dir", directory], {
+  return spawnSync(process.execPath, ["--experimental-strip-types", "--disable-warning=ExperimentalWarning", pollScript, "--dir", directory, ...args], {
     env,
     encoding: "utf8",
   })
@@ -312,6 +312,40 @@ test("the cron poller does nothing for an unconnected worktree", () => {
   assert.equal(result.status, 2, result.stderr)
   assert.match(result.stderr, /is a git worktree with no Office agent of its own; run \/office there/)
   assert.deepEqual(mcpCalls(), [], "no checkin and no dispatch from the worktree")
+})
+
+test("the cron poller refuses --session in an unconnected worktree", () => {
+  office.calls.length = 0
+  office.state.agentSlug = "agent-a"
+  const { main, worktree } = repoWithWorktree()
+  lib.saveCredentials(lib.agentCredentialsPath("agent-a"), credentials("access-a"))
+  lib.saveAgentPointers(main, main, "agent-a")
+  // What an older version saved on every poll in a worktree its repo-pointer
+  // fallback had quietly connected, and printed for cron: a session pointer for
+  // the main checkout's agent. The worktree has no agent of its own, so it
+  // refuses that mapping rather than check in as agent-a, run the inbox `pig` as
+  // it and dispatch its tasks.
+  lib.saveAgentPointer(lib.sessionPointerPath("old"), "agent-a")
+  // Nothing to handle, so the only Office call a poller could make here is the
+  // checkin itself.
+  const pending = { openTasks: office.state.openTasks, unreadMessages: office.state.unreadMessages }
+  office.state.openTasks = []
+  office.state.unreadMessages = []
+  try {
+    const refused = poller(worktree, ["--session", "old"])
+    assert.equal(refused.status, 2, refused.stderr)
+    assert.match(refused.stderr, /is a git worktree with no Office agent of its own; run \/office there/)
+    assert.deepEqual(mcpCalls(), [], "no checkin and no dispatch from the worktree")
+
+    // The same mapping still selects agent-a in the checkout it was approved in,
+    // so this is about the worktree, not about --session.
+    const accepted = poller(main, ["--session", "old"])
+    assert.equal(accepted.status, 0, accepted.stderr)
+    assert.equal(mcpCalls()[0]?.auth, "Bearer access-a")
+  } finally {
+    office.state.openTasks = pending.openTasks
+    office.state.unreadMessages = pending.unreadMessages
+  }
 })
 
 test("a worktree the old plugin gave an implicit pointer to stays unconnected", async (t) => {

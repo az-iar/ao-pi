@@ -160,7 +160,14 @@ async function main(): Promise<number> {
   const sessionAgent = values.session ? loadAgentPointer(sessionPointerPath(values.session)) : undefined
   if (values.session && !sessionAgent) throw new Error(`no Office agent saved for session ${values.session}`)
   const credentialsFile = values.credentials ? resolve(values.credentials) : sessionAgent ? agentCredentialsPath(sessionAgent) : resolved.credentialsFile
-  const explicitFile = values.credentials || values.session ? credentialsFile : undefined
+  // A session pointer is not an identity an unconnected worktree may act on. The
+  // old plugin wrote one there on every poll, through the repo-pointer fallback,
+  // so it names an approval made in the main checkout: honouring it would check
+  // in as that agent, run the inbox `pig` as it and dispatch its tasks. Refuse it
+  // and fall through to the same exit as a poller with no --session; --credentials
+  // and AGENT_OFFICE_TOKEN still hand an identity over on purpose.
+  const sessionFile = values.session && !resolved.unconnected ? credentialsFile : undefined
+  const explicitFile = values.credentials ? credentialsFile : sessionFile
   const { bearer } = createBearer(() => credentialsFileFor(resolved, explicitFile), explicitFile ? loadCredentials(explicitFile) : resolved.credentials)
   if (!(await bearer())) {
     log(

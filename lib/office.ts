@@ -56,7 +56,9 @@ export function taskID(item: any): string {
   return String(item?.id ?? item?.task_id ?? item?.slug ?? itemKey(item, "task"))
 }
 
-// One token per repo by default. Worktrees share the canonical project root;
+// One token per repo by default, keyed by the canonical root the caller passes:
+// that is the main checkout for a linked worktree too, so both name the same
+// per-repo file -- an unconnected worktree simply never reads it.
 // `AGENT_OFFICE_TOKEN_SCOPE=folder` keys by the loaded directory instead.
 export function credentialsPath(directory: string, canonical?: string, override = CREDENTIALS_OVERRIDE, scope = process.env.AGENT_OFFICE_TOKEN_SCOPE ?? "repo"): string {
   if (override) return override
