@@ -61,12 +61,15 @@ test("approving as a new agent does not overwrite the previous agent's token", a
   agentOffice(api as any)
   const ctx = { sessionManager: { getSessionId: () => "approval-session" }, isIdle: () => true, ui: { notify() {} } }
   for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx)
-  await waitFor(() => existsSync(join(agents, "pi.json")))
+  // GH-476: a session holding only the directory pointer to `a` does not own an
+  // identity, so it no longer checks in as `a` (and adopts `pi`) before anyone has
+  // approved it. The approval below is what gives it one.
+  assert.equal(existsSync(join(agents, "pi.json")), false, "a directory pointer alone acted as an agent")
   const approval = await tools.get("office_connect")!.execute("call", { agent_name: "new" })
   const link = approval.content[0].text.match(/https?:\/\/\S+/)?.[0]
   assert.ok(link, "the approval link is returned")
   await fetch(link, { redirect: "follow" })
-  await waitFor(() => JSON.parse(readFileSync(join(agents, "pi.json"), "utf8")).access_token !== "old-a")
+  await waitFor(() => existsSync(join(agents, "pi.json")) && JSON.parse(readFileSync(join(agents, "pi.json"), "utf8")).access_token !== "old-a")
 
   assert.equal(JSON.parse(readFileSync(join(agents, "a.json"), "utf8")).access_token, "old-a", "the old agent is untouched")
   assert.notEqual(JSON.parse(readFileSync(join(agents, "pi.json"), "utf8")).access_token, "old-a")

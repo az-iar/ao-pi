@@ -305,23 +305,28 @@ export default function agentOffice(pi: ExtensionAPI) {
   let sessionId: string | undefined
   const usingCredentialsOverride = Boolean(CREDENTIALS_OVERRIDE)
   // Set once an approval in this process hands over a token: the worktree is
-  // connected from that moment, before its own pointer file is written.
-  let connectedHere = false
+  // connected from that moment, before its own pointer file is written, and a
+  // pointer written from that approval is the worktree's own.
+  let approvedHere = false
   // Asked each time rather than once: /office here writes the worktree's own
   // pointer, and from that moment the session is connected like any other.
-  const noOwnCredentials = () => !connectedHere && isUnconnectedWorktree(directory) && !usingCredentialsOverride
+  const noOwnCredentials = () => !approvedHere && isUnconnectedWorktree(directory) && !usingCredentialsOverride
   // An explicit token or credentials file is handed over on purpose (dispatched
   // workers and children), so it keeps working in a worktree nobody connected.
   const unconnected = () => noOwnCredentials() && !process.env.AGENT_OFFICE_TOKEN?.trim()
-  // An unconnected worktree has no token file to read, not even the one the
-  // main checkout shares, so the bearer never falls back to it.
+  // An unconnected worktree has no token file to read, not even the one the main
+  // checkout shares, so the bearer never falls back to it.
   const auth = createBearer(() => (noOwnCredentials() ? undefined : credentialsFile), resolved.credentials)
-  const { call, checkin } = createClient(auth.bearer)
+  // ownedBearer is the only door to identity: while the session owns none it
+  // answers nothing, so checkin, call, the MCP registration and office_connect
+  // all fail closed instead of each resolving the host's credentials itself.
+  const ownedBearer = async () => (ownsIdentity ? auth.bearer() : undefined)
+  const { call, checkin } = createClient(ownedBearer)
 
   const sameCredentials = (a: Credentials, b: Credentials) =>
     a.office === b.office && a.client_id === b.client_id && a.access_token === b.access_token && a.refresh_token === b.refresh_token && a.expires_at === b.expires_at
   const adoptAgent = (slug?: string) => {
-    if (usingCredentialsOverride || !slug) return
+    if (usingCredentialsOverride || !slug || !ownsIdentity) return
     const target = agentCredentialsPath(slug)
     if (auth.credentials) {
       const current = loadCredentials(target)
@@ -390,7 +395,7 @@ export default function agentOffice(pi: ExtensionAPI) {
     if (unconnected()) return
     let token: string | undefined
     try {
-      token = await auth.bearer()
+      token = await ownedBearer()
     } catch (err) {
       lastMcpError = String(err)
       warn("could not read the Office token", { error: String(err) })
@@ -426,6 +431,16 @@ export default function agentOffice(pi: ExtensionAPI) {
   let working = false
   let heartbeat: ReturnType<typeof setInterval> | undefined
   let pollTimer: ReturnType<typeof setInterval> | undefined
+
+  // Polling starts in two places and must behave identically in both: a session
+  // that boots owning an identity, and one that approves mid-session (#476
+  // follow-up). poll() itself fails closed while the session owns nothing.
+  function startPolling() {
+    if (!pollAllowed() || pollTimer) return
+    pollTimer = setInterval(() => void poll(), pollInterval)
+    pollTimer.unref()
+    void poll()
+  }
   let queue = Promise.resolve()
   let lastPollAt: number | undefined
   let lastPollError: string | undefined
@@ -442,6 +457,11 @@ export default function agentOffice(pi: ExtensionAPI) {
   // host's environment and pointer files but not this, which is the whole point:
   // identity is per session, never per machine or per directory (#476).
   let speaksAsOwn = false
+  // ownsIdentity is whether *this session* may act as an Office agent: it was
+  // approved here, it is resuming a session that was, or a dispatcher granted it
+  // explicitly (AGENT_OFFICE_PI_CREDENTIALS). The directory pointer and the host
+  // environment are not evidence - a child inherits both, which is #476.
+  let ownsIdentity = false
 
   const notice = (text: string, level: "info" | "warning" | "error" = "info") => {
     try {
@@ -467,7 +487,7 @@ export default function agentOffice(pi: ExtensionAPI) {
   const report = (status: "working" | "idle") => {
     queue = queue.then(async () => {
       try {
-        if (!(await auth.bearer())) return
+        if (!(await ownedBearer())) return
         if (status === "idle" && (await checkin()).agent?.work_status === "blocked") return
         await checkin({ status, note })
       } catch (err) {
@@ -513,7 +533,6 @@ export default function agentOffice(pi: ExtensionAPI) {
     adoptAgent(me.agent?.slug)
     ownAgent = me.agent
     await connectMcp(reconnectMcp)
-    startPolling()
     await observePending(me.pending, false)
     const pending = me.pending ?? {}
     const mcpLine = mcpRegistered
@@ -536,22 +555,40 @@ export default function agentOffice(pi: ExtensionAPI) {
       pasted: false,
       done: started.credentials.then(async (next) => {
         auth.credentials = next
-        connectedHere = true
         const previousFile = credentialsFile
+        const previouslyOwned = ownsIdentity
         const pendingFile = usingCredentialsOverride ? undefined : join(dirname(legacyCredentialsFile), `pending-${started.state}.json`)
-        if (pendingFile) {
-          saveCredentials(pendingFile, next)
-          credentialsFile = pendingFile
-        } else {
-          saveCredentials(credentialsFile, next)
+        // The approval's credentials are this session's own grant. Ownership is
+        // set at the moment they are persisted, so it is in place before
+        // connectedSummary()/connectMcp() act on them, and it is withdrawn if the
+        // persist fails: a grant we could not record is not one we hold (#476).
+        try {
+          if (pendingFile) {
+            saveCredentials(pendingFile, next)
+            credentialsFile = pendingFile
+          } else {
+            saveCredentials(credentialsFile, next)
+          }
+          ownsIdentity = true
+          approvedHere = true
+        } catch (err) {
+          ownsIdentity = previouslyOwned
+          approvedHere = false
+          credentialsFile = previousFile
+          throw err
         }
+        // The approval is this session's identity now, so it starts what a
+        // session with one starts at boot: polling. Without this a session that
+        // boots unowned and then approves connects but never picks up its inbox
+        // or sends heartbeats until it restarts (#476 follow-up).
+        startPolling()
         try {
           return await connectedSummary(true)
         } catch (err) {
           // The connection did not finish (the checkin failed, the MCP server
           // could not be registered): drop back to unconnected, so a worktree
           // never falls back to the token file it shares with the main checkout.
-          connectedHere = false
+          approvedHere = false
           throw err
         } finally {
           if (pendingFile) {
@@ -701,7 +738,7 @@ export default function agentOffice(pi: ExtensionAPI) {
 
   const poll = async () => {
     try {
-      if (!(await auth.bearer())) return
+      if (!(await ownedBearer())) return
       await connectMcp()
       const me = await checkin()
       adoptAgent(me.agent?.slug)
@@ -719,14 +756,6 @@ export default function agentOffice(pi: ExtensionAPI) {
   const configuredPollNumber = configuredPoll ? Number(configuredPoll) : NaN
   const pollInterval = Number.isFinite(configuredPollNumber) ? Math.max(configuredPollNumber, 1_000) : DEFAULT_POLL_MS
   const pollAllowed = () => !isChild && !onTaskBranch(directory) && !unconnected()
-  // A session can become connected while it runs (/office in this worktree), so
-  // the timer is started wherever the connection state may have changed.
-  const startPolling = () => {
-    if (!pollAllowed() || pollTimer) return
-    pollTimer = setInterval(() => void poll(), pollInterval)
-    pollTimer.unref()
-    void poll()
-  }
 
   // --- status reporting on this session's own streaming ---
   pi.on("session_start", async (_event, ctx) => {
@@ -738,8 +767,16 @@ export default function agentOffice(pi: ExtensionAPI) {
         credentialsFile = agentCredentialsPath(savedAgent)
         auth.credentials = loadCredentials(credentialsFile)
         speaksAsOwn = true
+        ownsIdentity = true
       }
     }
+    // Ownership rule (#476). Counts: this session's own pointer (above), an
+    // explicit credentials override (dispatch), and AGENT_OFFICE_TOKEN for a
+    // NON-child session - an operator put it in the environment of the process
+    // that is this agent. Never counts for a child, which inherits the host's
+    // environment. The directory pointer and legacy credentials do NOT count on
+    // their own: a child inherits both, so they only pre-fill an approval.
+    ownsIdentity = ownsIdentity || usingCredentialsOverride || (!isChild && Boolean(process.env.AGENT_OFFICE_TOKEN))
     // A child session has its own id, so it has no approval of its own and no
     // business speaking as whoever approved the host session. Registering the
     // office MCP without one is what let a pi child post as its host (#476):
@@ -754,6 +791,21 @@ export default function agentOffice(pi: ExtensionAPI) {
       notice(
         `Child session ${sessionId ?? "(unknown)"} has no Office identity of its own, so it cannot post: without an approval of its own it would have spoken as ${wouldSpeakAs}. Run /office here if this session needs to speak as an agent.`,
         "warning",
+      )
+      return
+    }
+    // Not a child, but nothing above gave this session an identity: only a
+    // directory pointer or legacy credentials, which do not count by themselves.
+    // Record the decision instead of silently doing nothing; /office approves.
+    if (!ownsIdentity) {
+      // In a linked worktree the gap is the worktree's, not the session's: the
+      // main checkout beside it is often connected, and it is exactly the agent
+      // this worktree must not speak as.
+      notice(
+        unconnected()
+          ? "Agent Office: this git worktree has no Office agent of its own, so it will not act as the main checkout's. Run /office here to connect it."
+          : `Agent Office: this session (${sessionId ?? "unknown"}) has no Office identity of its own yet. Run /office to approve one.`,
+        "info",
       )
       return
     }
@@ -802,7 +854,10 @@ export default function agentOffice(pi: ExtensionAPI) {
           wake(`Agent Office status:\n${report}`)
           return
         }
-        if (!input && (await auth.bearer())) {
+        // "Already connected" means this session owns an identity, not that some
+        // inherited bearer resolves: a session without one is offered an approval
+        // rather than errored at (startApproval/finishWithCallback use the raw bearer).
+        if (!input && ownsIdentity) {
           ctx.ui.notify("Checking Agent Office…", "info")
           wake(await connectedSummary())
           return
@@ -833,7 +888,9 @@ export default function agentOffice(pi: ExtensionAPI) {
       const { reconnect, callback_url, agent_name } = params as { reconnect?: boolean; callback_url?: string; agent_name?: string }
       const text = async () => {
         if (callback_url) return finishWithCallback(pastedCallback(callback_url) ?? callback_url)
-        if (agent_name?.trim() || reconnect || !(await auth.bearer())) {
+        // Same for office_connect: a session with no identity yet is exactly who
+        // calls it, and it should get an approval link, not "not connected".
+        if (agent_name?.trim() || reconnect || !ownsIdentity) {
           const approvalName = agent_name?.trim() ? agent_name.trim().slice(0, 80) : clientName
           return approvalText(approvalName, await startApproval(approvalName))
         }
