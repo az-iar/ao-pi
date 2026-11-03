@@ -524,13 +524,6 @@ export default function agentOffice(pi: ExtensionAPI) {
   // host's environment and pointer files but not this, which is the whole point:
   // identity is per session, never per machine or per directory (#476).
   let speaksAsOwn = false
-  // approvedHere is whether this session's own approval chose its credentials,
-  // as opposed to ownsIdentity, which is also true when a token in the
-  // environment or a dispatcher's credentials override does. The identity header
-  // may only name an agent when the *pointer* is what the bearer came from
-  // (sunny, ao-pi#12): with someone else's token the pointer names an agent the
-  // call does not act as, and #508 answers that with a 409 on every call.
-  let approvedHere = false
   // ownsIdentity is whether *this session* may act as an Office agent: it was
   // approved here, it is resuming a session that was, or a dispatcher granted it
   // explicitly (AGENT_OFFICE_PI_CREDENTIALS). The directory pointer and the host
