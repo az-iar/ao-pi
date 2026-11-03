@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { execFileSync, spawnSync } from "node:child_process"
+import { execFileSync, spawn, spawnSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
@@ -136,16 +136,32 @@ const tokenHelper = (directory: string, env: Record<string, string> = {}) =>
     encoding: "utf8",
   })
 
-const poller = (directory: string, args: string[] = []) => {
-  const pollScript = fileURLToPath(new URL("../poll.ts", import.meta.url))
+const pollEnv = () => {
   const env: Record<string, string> = { ...(process.env as Record<string, string>), HOME: home, AGENT_OFFICE_URL: url, AGENT_OFFICE_POLL_MS: "60000" }
   delete env.AGENT_OFFICE_TOKEN
   delete env.AGENT_OFFICE_PI_CREDENTIALS
-  return spawnSync(process.execPath, ["--experimental-strip-types", "--disable-warning=ExperimentalWarning", pollScript, "--dir", directory, ...args], {
-    env,
-    encoding: "utf8",
-  })
+  return env
 }
+
+const pollScript = fileURLToPath(new URL("../poll.ts", import.meta.url))
+const pollArgs = (directory: string, args: string[]) => ["--experimental-strip-types", "--disable-warning=ExperimentalWarning", pollScript, "--dir", directory, ...args]
+
+// A poller that exits before any Office call may be run synchronously.
+const poller = (directory: string, args: string[] = []) => spawnSync(process.execPath, pollArgs(directory, args), { env: pollEnv(), encoding: "utf8" })
+
+// The fake Office is a server in this process, so a poller that reaches a
+// checkin has to run beside a free event loop: spawnSync would hold every
+// response for as long as the child waits for one, and the checkin would time
+// out instead of answering.
+const pollerAsync = (directory: string, args: string[] = []) =>
+  new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
+    const child = spawn(process.execPath, pollArgs(directory, args), { env: pollEnv() })
+    let stdout = ""
+    let stderr = ""
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk))
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk))
+    child.on("close", (status) => resolve({ status, stdout, stderr }))
+  })
 
 const mcpCalls = () => office.calls.filter((call) => call.path === "/mcp")
 
@@ -314,7 +330,7 @@ test("the cron poller does nothing for an unconnected worktree", () => {
   assert.deepEqual(mcpCalls(), [], "no checkin and no dispatch from the worktree")
 })
 
-test("the cron poller refuses --session in an unconnected worktree", () => {
+test("the cron poller refuses --session in an unconnected worktree", async () => {
   office.calls.length = 0
   office.state.agentSlug = "agent-a"
   const { main, worktree } = repoWithWorktree()
@@ -332,14 +348,14 @@ test("the cron poller refuses --session in an unconnected worktree", () => {
   office.state.openTasks = []
   office.state.unreadMessages = []
   try {
-    const refused = poller(worktree, ["--session", "old"])
+    const refused = await pollerAsync(worktree, ["--session", "old"])
     assert.equal(refused.status, 2, refused.stderr)
     assert.match(refused.stderr, /is a git worktree with no Office agent of its own; run \/office there/)
     assert.deepEqual(mcpCalls(), [], "no checkin and no dispatch from the worktree")
 
     // The same mapping still selects agent-a in the checkout it was approved in,
     // so this is about the worktree, not about --session.
-    const accepted = poller(main, ["--session", "old"])
+    const accepted = await pollerAsync(main, ["--session", "old"])
     assert.equal(accepted.status, 0, accepted.stderr)
     assert.equal(mcpCalls()[0]?.auth, "Bearer access-a")
   } finally {
