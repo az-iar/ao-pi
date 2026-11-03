@@ -413,9 +413,8 @@ export default function agentOffice(pi: ExtensionAPI) {
   let heartbeat: ReturnType<typeof setInterval> | undefined
   let pollTimer: ReturnType<typeof setInterval> | undefined
 
-  // Polling starts in two places and must behave identically in both: a session
-  // that boots owning an identity, and one that approves mid-session (#476
-  // follow-up). poll() itself fails closed while the session owns nothing.
+  // One place starts polling, so the boot path and a later approval behave the
+  // same way: poll() itself fails closed while the session owns nothing (#476).
   function startPolling() {
     if (!pollingAllowed || pollTimer) return
     pollTimer = setInterval(() => void poll(), pollInterval)
@@ -770,9 +769,12 @@ export default function agentOffice(pi: ExtensionAPI) {
     // Not a child, but nothing above gave this session an identity: only a
     // directory pointer or legacy credentials, which do not count by themselves.
     // Record the decision instead of silently doing nothing; /office approves.
+    // The notice stays, the return does not: polling starts either way and
+    // poll() fails closed on ownedBearer() until this session owns an identity,
+    // so an approval later in the session is picked up without a restart (#476
+    // follow-up). A child is still kept away from the timer by pollingAllowed.
     if (!ownsIdentity) {
       notice(`Agent Office: this session (${sessionId ?? "unknown"}) has no Office identity of its own yet. Run /office to approve one.`, "info")
-      return
     }
     await connectMcp()
     startPolling()
