@@ -1,10 +1,10 @@
 import assert from "node:assert/strict"
 import { execFileSync, spawnSync } from "node:child_process"
-import { mkdirSync, mkdtempSync } from "node:fs"
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { after, test } from "node:test"
+import { after, test, type TestContext } from "node:test"
 import { fileURLToPath } from "node:url"
 import { fakeOffice } from "./fake-office.mts"
 
@@ -29,6 +29,14 @@ after(() => office.close())
 
 // lib/office.ts resolves ~/.config/agent-office from HOME when it loads.
 const home = mkdtempSync(join(tmpdir(), "ao-worktree-"))
+
+// The extension opens each approval link in a browser. In a test nobody clicks
+// it, and on a shared machine a real browser would sit holding CPU long after
+// the test is gone, so the opener is a no-op that exits at once.
+const openerDir = join(home, "bin")
+mkdirSync(openerDir, { recursive: true })
+writeFileSync(join(openerDir, "xdg-open"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+process.env.PATH = `${openerDir}:${process.env.PATH}`
 process.env.HOME = home
 process.env.AGENT_OFFICE_URL = url
 process.env.AGENT_OFFICE_POLL_MS = "60000"
@@ -113,6 +121,15 @@ function session(directory: string, id = `session-worktree-${++sessions}`) {
   }
 }
 
+// A session whose shutdown runs even when an assertion below it throws: an
+// approval that is still listening holds the process open, and a failing test
+// must fail fast instead of stalling the runner.
+const openSession = (t: TestContext, directory: string, id?: string) => {
+  const opened = session(directory, id)
+  t.after(() => opened.shutdown())
+  return opened
+}
+
 const tokenHelper = (directory: string, env: Record<string, string> = {}) =>
   spawnSync(process.execPath, ["--experimental-strip-types", "--disable-warning=ExperimentalWarning", tokenScript, "--dir", directory], {
     env: { ...process.env, HOME: home, ...env },
@@ -140,7 +157,7 @@ async function waitFor(check: () => boolean, timeoutMs = 5_000) {
   }
 }
 
-test("an unconnected worktree resolves no credentials, registers no office tools and does not poll", async () => {
+test("an unconnected worktree resolves no credentials, registers no office tools and does not poll", async (t) => {
   office.calls.length = 0
   office.state.agentSlug = "agent-a"
   const { main, worktree } = repoWithWorktree()
@@ -165,7 +182,7 @@ test("an unconnected worktree resolves no credentials, registers no office tools
   // identity to this worktree: the worktree's own pointer is what connects it.
   const sessionId = "session-unconnected"
   lib.saveAgentPointer(lib.sessionPointerPath(sessionId), "agent-a")
-  const worktreeSession = session(worktree, sessionId)
+  const worktreeSession = openSession(t, worktree, sessionId)
   await worktreeSession.start()
   await worktreeSession.working()
   await new Promise((resolve) => setTimeout(resolve, 150))
@@ -176,7 +193,6 @@ test("an unconnected worktree resolves no credentials, registers no office tools
   assert.equal(status.pollingAllowed, false)
   assert.notEqual(status.credentialsFile, lib.agentCredentialsPath("agent-a"), "status does not name the main checkout's agent token file")
   assert.deepEqual(mcpCalls(), [], "no checkin, poll or status write")
-  await worktreeSession.shutdown()
 
   assert.equal(lib.loadAgentPointer(lib.agentPointerPath(worktree)), undefined, "nothing connected the worktree")
   assert.equal(lib.resolveCredentials(main, main).credentials?.access_token, "access-a")
@@ -193,7 +209,7 @@ test("the token file the worktree shares with the main checkout is not a fallbac
   assert.equal(tokenHelper(worktree).status, 1)
 })
 
-test("/office in a worktree connects that worktree alone", async () => {
+test("/office in a worktree connects that worktree alone", async (t) => {
   office.calls.length = 0
   office.state.agentSlug = "agent-b"
   const { main, worktree } = repoWithWorktree()
@@ -201,7 +217,7 @@ test("/office in a worktree connects that worktree alone", async () => {
   lib.saveAgentPointers(main, main, "agent-a")
   assert.equal(lib.resolveCredentials(worktree, main).credentials, undefined)
 
-  const worktreeSession = session(worktree)
+  const worktreeSession = openSession(t, worktree)
   await worktreeSession.start()
   const approval = await worktreeSession.tools.get("office_connect").execute("call", { agent_name: "agent-b" })
   const link = approval.content[0].text.match(/https?:\/\/\S+/)?.[0]
@@ -223,15 +239,16 @@ test("/office in a worktree connects that worktree alone", async () => {
   assert.equal(status.unconnected, false)
   assert.equal(status.pollingAllowed, true)
   await waitFor(() => mcpCalls().some((call) => call.auth?.startsWith("Bearer ")))
-  await worktreeSession.shutdown()
 
   assert.equal(lib.resolveCredentials(main, main).credentials?.access_token, "access-a", "the worktree did not move the main checkout")
 })
 
-test("a task worktree a dispatcher adopts resolves that agent, at its root and below it", async () => {
+test("a task worktree a dispatcher adopts resolves that agent, at its root and below it", async (t) => {
   const { main } = repoWithWorktree()
   lib.saveCredentials(lib.agentCredentialsPath("agent-a"), credentials("access-a"))
-  lib.saveCredentials(lib.agentCredentialsPath("agent-b"), credentials("access-b"))
+  // A slug of its own: the approval in the test above saves its own token under
+  // agent-b, and its poll can land after that test ends.
+  lib.saveCredentials(lib.agentCredentialsPath("agent-c"), credentials("access-c"))
   lib.saveAgentPointers(main, main, "agent-a")
   const { path, branch } = await lib.addWorktree(main, "task-identity")
   try {
@@ -241,23 +258,23 @@ test("a task worktree a dispatcher adopts resolves that agent, at its root and b
 
     // A plain write in a worktree -- a poll, an inherited token -- leaves no
     // pointer behind: only an adoption on purpose does.
-    lib.saveAgentPointers(path, main, "agent-b")
+    lib.saveAgentPointers(path, main, "agent-c")
     assert.equal(lib.loadAgentPointer(lib.agentPointerPath(path)), undefined, "an unmarked write is dropped in a worktree")
     assert.equal(lib.isUnconnectedWorktree(path), true)
 
     // The dispatcher adopts the worktree by writing its own marked pointer.
-    lib.saveAgentPointers(path, main, "agent-b", "dispatch")
-    assert.equal(lib.loadMarkedAgentPointer(lib.agentPointerPath(path)), "agent-b")
+    lib.saveAgentPointers(path, main, "agent-c", "dispatch")
+    assert.equal(lib.loadMarkedAgentPointer(lib.agentPointerPath(path)), "agent-c")
     assert.equal(lib.isUnconnectedWorktree(path), false)
-    assert.equal(lib.resolveCredentials(path, main).credentials?.access_token, "access-b")
-    assert.equal(tokenHelper(path).stdout, "Bearer access-b")
+    assert.equal(lib.resolveCredentials(path, main).credentials?.access_token, "access-c")
+    assert.equal(tokenHelper(path).stdout, "Bearer access-c")
 
     // A subdirectory of that worktree resolves the same agent, never the main
     // checkout's: the repo pointer beside the worktree is agent-a's.
     const nested = join(path, "nested")
     mkdirSync(nested)
-    assert.equal(lib.resolveCredentials(nested, main).credentials?.access_token, "access-b")
-    assert.equal(tokenHelper(nested).stdout, "Bearer access-b")
+    assert.equal(lib.resolveCredentials(nested, main).credentials?.access_token, "access-c")
+    assert.equal(tokenHelper(nested).stdout, "Bearer access-c")
   } finally {
     git(main, ["worktree", "remove", "--force", path])
     git(main, ["branch", "-D", branch])
@@ -297,7 +314,7 @@ test("the cron poller does nothing for an unconnected worktree", () => {
   assert.deepEqual(mcpCalls(), [], "no checkin and no dispatch from the worktree")
 })
 
-test("a worktree the old plugin gave an implicit pointer to stays unconnected", async () => {
+test("a worktree the old plugin gave an implicit pointer to stays unconnected", async (t) => {
   office.calls.length = 0
   office.state.agentSlug = "agent-a"
   const { main, worktree } = repoWithWorktree()
@@ -319,13 +336,12 @@ test("a worktree the old plugin gave an implicit pointer to stays unconnected", 
   // there, because the worktree has no agent of its own.
   const sessionId = "session-stale-pointer"
   lib.saveAgentPointer(lib.sessionPointerPath(sessionId), "agent-a")
-  const worktreeSession = session(worktree, sessionId)
+  const worktreeSession = openSession(t, worktree, sessionId)
   await worktreeSession.start()
   await worktreeSession.working()
   await new Promise((resolve) => setTimeout(resolve, 150))
   assert.equal(worktreeSession.mcp.size, 0, "no office MCP server behind a stale pointer")
   assert.deepEqual(mcpCalls(), [], "no checkin, poll or status write")
-  await worktreeSession.shutdown()
 
   // The main checkout is untouched by any of this.
   assert.equal(lib.resolveCredentials(main, main).credentials?.access_token, "access-a")
@@ -347,7 +363,7 @@ test("a marked pointer connects the worktree, and running /office there once is 
   assert.equal(lib.resolveCredentials(main, main).credentials?.access_token, "access-a")
 })
 
-test("an explicit token still works in an unconnected worktree and leaves no pointer behind", async () => {
+test("an explicit token still works in an unconnected worktree and leaves no pointer behind", async (t) => {
   office.calls.length = 0
   office.state.agentSlug = "env-agent"
   const { main, worktree } = repoWithWorktree()
@@ -362,7 +378,7 @@ test("an explicit token still works in an unconnected worktree and leaves no poi
     assert.notEqual(resolved.credentialsFile, lib.credentialsPath(main, main), "not the token file the main checkout uses")
     assert.equal(tokenHelper(worktree).stdout, "Bearer token-env")
 
-    const worktreeSession = session(worktree)
+    const worktreeSession = openSession(t, worktree)
     await worktreeSession.start()
     await waitFor(() => mcpCalls().length > 0)
     assert.ok(worktreeSession.mcp.get("office"), "the office MCP server is registered for the handed-over identity")
@@ -378,7 +394,6 @@ test("an explicit token still works in an unconnected worktree and leaves no poi
     await worktreeSession.tools.get("office_connect").execute("call", { agent_name: "agent-c" })
     assert.equal(lib.loadAgentPointer(lib.agentPointerPath(worktree)), undefined, "office_connect on a token bearer wrote a pointer")
     assert.equal(lib.loadCredentials(lib.agentCredentialsPath("env-agent")), undefined, "office_connect on a token bearer copied a token file")
-    await worktreeSession.shutdown()
 
     // The token was handed in, not approved here: nothing connects the worktree
     // once it is gone.
@@ -390,7 +405,7 @@ test("an explicit token still works in an unconnected worktree and leaves no poi
   assert.equal(lib.resolveCredentials(main, main).credentials?.access_token, "access-a")
 })
 
-test("the main checkout, its subdirectories and plain directories are unchanged", async () => {
+test("the main checkout, its subdirectories and plain directories are unchanged", async (t) => {
   office.calls.length = 0
   office.state.agentSlug = "agent-a"
   const { main } = repoWithWorktree()
@@ -416,11 +431,10 @@ test("the main checkout, its subdirectories and plain directories are unchanged"
   assert.equal(lib.resolveCredentials(plain, plain).credentials?.access_token, "access-plain")
 
   lib.saveAgentPointer(lib.sessionPointerPath("session-main"), "agent-a")
-  const mainSession = session(main, "session-main")
+  const mainSession = openSession(t, main, "session-main")
   await mainSession.start()
   await waitFor(() => mcpCalls().length > 0)
   assert.ok(mainSession.mcp.get("office"))
   assert.equal(mcpCalls()[0].auth, "Bearer access-a")
   assert.equal((await mainSession.status()).pollingAllowed, true)
-  await mainSession.shutdown()
 })
