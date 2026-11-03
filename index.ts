@@ -808,10 +808,10 @@ export default function agentOffice(pi: ExtensionAPI) {
           wake(`Agent Office status:\n${report}`)
           return
         }
-        // The /office command is how a session gets an identity, so it reads the
-        // host credentials directly: gating it on ownership would make the latch
-        // impossible to open from a fresh session.
-        if (!input && (await auth.bearer())) {
+        // "Already connected" means this session owns an identity, not that some
+        // inherited bearer resolves: a session without one is offered an approval
+        // rather than errored at (startApproval/finishWithCallback use the raw bearer).
+        if (!input && ownsIdentity) {
           ctx.ui.notify("Checking Agent Office…", "info")
           wake(await connectedSummary())
           return
@@ -842,9 +842,9 @@ export default function agentOffice(pi: ExtensionAPI) {
       const { reconnect, callback_url, agent_name } = params as { reconnect?: boolean; callback_url?: string; agent_name?: string }
       const text = async () => {
         if (callback_url) return finishWithCallback(pastedCallback(callback_url) ?? callback_url)
-        // Same for office_connect: asking to be approved is not acting as an
-        // agent, and a session with no identity yet is exactly who calls it.
-        if (agent_name?.trim() || reconnect || !(await auth.bearer())) {
+        // Same for office_connect: a session with no identity yet is exactly who
+        // calls it, and it should get an approval link, not "not connected".
+        if (agent_name?.trim() || reconnect || !ownsIdentity) {
           const approvalName = agent_name?.trim() ? agent_name.trim().slice(0, 80) : clientName
           return approvalText(approvalName, await startApproval(approvalName))
         }

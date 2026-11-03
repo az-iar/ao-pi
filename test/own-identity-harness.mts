@@ -27,20 +27,22 @@ export async function harness(env: Record<string, string | undefined>) {
   const { default: extension } = await import("../index.ts")
   const start = async (sessionId: string) => {
     const registered: string[] = []
+    const sent: string[] = []
     const notices: string[] = []
     const handlers = new Map<string, Function>()
     const tools = new Map<string, any>()
+    const commands = new Map<string, any>()
     extension({
       on: (name: string, fn: Function) => handlers.set(name, fn),
-      registerCommand() {},
+      registerCommand: (name: string, def: any) => commands.set(name, def),
       registerTool: (tool: any) => tools.set(tool.name, tool),
       registerMcpServer(name: string) { registered.push(name) },
       unregisterMcpServer() {},
-      sendUserMessage() {},
+      sendUserMessage: (text: string) => sent.push(text),
     } as any)
     const ctx = { sessionManager: { getSessionId: () => sessionId }, ui: { notify: (text: string) => notices.push(text) }, isIdle: () => true }
     await handlers.get("session_start")!({}, ctx)
-    return { registered, notices, tools, shutdown: () => handlers.get("session_shutdown")!({}, ctx) }
+    return { registered, notices, tools, commands, sent, shutdown: () => handlers.get("session_shutdown")!({}, ctx) }
   }
   return { office, url, home, repo, lib, start }
 }
