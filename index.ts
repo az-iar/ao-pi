@@ -301,12 +301,20 @@ export default function agentOffice(pi: ExtensionAPI) {
   let sessionId: string | undefined
   const usingCredentialsOverride = Boolean(CREDENTIALS_OVERRIDE)
   const auth = createBearer(() => credentialsFile, resolved.credentials)
-  const { call, checkin } = createClient(auth.bearer)
+  // ownedBearer is the only door to identity: while the session owns none, it
+  // answers nothing, so checkin, call, the MCP registration and office_connect
+  // all fail closed rather than each resolving the host's credentials itself
+  // (bruno's second must-fix on #476).
+  const ownedBearer = async () => (ownsIdentity ? auth.bearer() : undefined)
+  const { call, checkin } = createClient(ownedBearer)
 
   const sameCredentials = (a: Credentials, b: Credentials) =>
     a.office === b.office && a.client_id === b.client_id && a.access_token === b.access_token && a.refresh_token === b.refresh_token && a.expires_at === b.expires_at
   const adoptAgent = (slug?: string) => {
-    if (usingCredentialsOverride || !slug) return
+    // Adopting writes this session's pointer, so a session that owns no identity
+    // must not do it: that is how a child's next start would inherit the host's
+    // agent (bruno's first should-fix on #476).
+    if (usingCredentialsOverride || !slug || !ownsIdentity) return
     const target = agentCredentialsPath(slug)
     if (auth.credentials) {
       const current = loadCredentials(target)
@@ -372,7 +380,7 @@ export default function agentOffice(pi: ExtensionAPI) {
     if (mcpRegistered && !force) return
     let token: string | undefined
     try {
-      token = await auth.bearer()
+      token = await ownedBearer()
     } catch (err) {
       lastMcpError = String(err)
       warn("could not read the Office token", { error: String(err) })
@@ -420,10 +428,18 @@ export default function agentOffice(pi: ExtensionAPI) {
   const assignedKeys = new Map<string, string>()
   const repo = canonical ?? directory
   const isChild = process.env.AGENT_OFFICE_CHILD === "1"
-  // Whether this session was approved as an agent itself. A child inherits the
-  // host's environment and pointer files but not this, which is the whole point:
-  // identity is per session, never per machine or per directory (#476).
-  let speaksAsOwn = false
+  // ownsIdentity is whether *this session* may act as an Office agent: it was
+  // approved here (an approval completed in this session) or it is resuming a
+  // session that was. The directory pointer and the host's environment are not
+  // evidence - that is the bug in #476: a child inherits both and spoke as its
+  // host. A dispatch worker is the one exception and it is explicit: the runner
+  // hands it AGENT_OFFICE_PI_CREDENTIALS naming the identity it was dispatched
+  // as, which is a grant rather than an inheritance (usingCredentialsOverride).
+  //
+  // Everything that reads identity - bearer, checkin, the MCP registration and
+  // office_connect - refuses while this is false. A gate in one handler is not
+  // enough: each of those paths resolves the host's credentials on its own.
+  let ownsIdentity = false
 
   const notice = (text: string, level: "info" | "warning" | "error" = "info") => {
     try {
@@ -449,7 +465,7 @@ export default function agentOffice(pi: ExtensionAPI) {
   const report = (status: "working" | "idle") => {
     queue = queue.then(async () => {
       try {
-        if (!(await auth.bearer())) return
+        if (!(await ownedBearer())) return
         if (status === "idle" && (await checkin()).agent?.work_status === "blocked") return
         await checkin({ status, note })
       } catch (err) {
@@ -675,7 +691,7 @@ export default function agentOffice(pi: ExtensionAPI) {
 
   const poll = async () => {
     try {
-      if (!(await auth.bearer())) return
+      if (!(await ownedBearer())) return
       await connectMcp()
       const me = await checkin()
       adoptAgent(me.agent?.slug)
@@ -703,24 +719,28 @@ export default function agentOffice(pi: ExtensionAPI) {
       if (savedAgent) {
         credentialsFile = agentCredentialsPath(savedAgent)
         auth.credentials = loadCredentials(credentialsFile)
-        speaksAsOwn = true
+        ownsIdentity = true
       }
     }
+    // A session that has never been approved may not act as anyone, whatever
+    // the directory pointer or the environment says. This is the case #476 was
+    // about: a child of an approved session, with no approval of its own.
+    ownsIdentity = ownsIdentity || usingCredentialsOverride
     // A child session has its own id, so it has no approval of its own and no
     // business speaking as whoever approved the host session. Registering the
     // office MCP without one is what let a pi child post as its host (#476):
     // the bearer resolves from the directory pointer, so the office sees the
     // host's agent. No approval here, no tools at all - fail closed and say why.
-    if (isChild && !usingCredentialsOverride && !speaksAsOwn) {
+    if (!ownsIdentity) {
       // Name both the session and the agent it would have spoken as: the whole
       // point of this ticket is that the sender line is unverifiable after the
       // fact, so the refusal has to be traceable in the log instead (#476).
       const wouldSpeakAs =
         loadAgentPointer(agentPointerPath(directory)) ?? loadAgentPointer(agentPointerPath(repo)) ?? "the host's agent"
-      notice(
-        `Child session ${sessionId ?? "(unknown)"} has no Office identity of its own, so it cannot post: without an approval of its own it would have spoken as ${wouldSpeakAs}. Run /office here if this session needs to speak as an agent.`,
-        "warning",
-      )
+      const why = `Session ${sessionId ?? "(unknown)"} has no Office identity of its own, so it cannot post: without an approval of its own it would have spoken as ${wouldSpeakAs}. Run /office here if this session needs to speak as an agent.`
+      notice(why, "warning")
+      // --print and any headless run show no UI, so the refusal also goes to stderr.
+      warn("office identity refused for this session", { session: sessionId ?? null, wouldSpeakAs })
       return
     }
     await connectMcp()
@@ -772,7 +792,7 @@ export default function agentOffice(pi: ExtensionAPI) {
           wake(`Agent Office status:\n${report}`)
           return
         }
-        if (!input && (await auth.bearer())) {
+        if (!input && (await ownedBearer())) {
           ctx.ui.notify("Checking Agent Office…", "info")
           wake(await connectedSummary())
           return
@@ -803,7 +823,7 @@ export default function agentOffice(pi: ExtensionAPI) {
       const { reconnect, callback_url, agent_name } = params as { reconnect?: boolean; callback_url?: string; agent_name?: string }
       const text = async () => {
         if (callback_url) return finishWithCallback(pastedCallback(callback_url) ?? callback_url)
-        if (agent_name?.trim() || reconnect || !(await auth.bearer())) {
+        if (agent_name?.trim() || reconnect || !(await ownedBearer())) {
           const approvalName = agent_name?.trim() ? agent_name.trim().slice(0, 80) : clientName
           return approvalText(approvalName, await startApproval(approvalName))
         }

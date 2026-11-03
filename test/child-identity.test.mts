@@ -52,7 +52,7 @@ test("a child session with no approval of its own cannot speak as its host", asy
   const child = await start("child-session")
   assert.deepEqual(child.registered, [], "the Office MCP server was registered for a child with no approval")
   const notice = child.notices.join(" | ")
-  assert.ok(/child session/i.test(notice) && /\/office/.test(notice), `the child was not told why it cannot post: ${notice}`)
+  assert.ok(/no Office identity/i.test(notice) && /\/office/.test(notice), `the child was not told why it cannot post: ${notice}`)
   // The refusal has to be traceable: it names the session and the agent it would
   // have spoken as, because the sender line is unverifiable after the fact.
   assert.match(notice, /child-session/, `the notice does not name the session: ${notice}`)
@@ -68,4 +68,48 @@ test("a child session with no approval of its own cannot speak as its host", asy
   await host.shutdown()
 
   await office.close()
+})
+
+// The incident's shape, which the first version of this fix missed: rodri's
+// child was NOT started with AGENT_OFFICE_CHILD=1, so a gate keyed on that flag
+// skipped it entirely. Ownership of an identity is what decides, not a flag the
+// caller has to remember to set.
+test("a child without AGENT_OFFICE_CHILD, and one holding AGENT_OFFICE_TOKEN, still get no Office identity", async () => {
+  for (const childEnv of [{}, { AGENT_OFFICE_TOKEN: "token-from-the-host" }]) {
+    const office = fakeOffice()
+    const url = await office.listen()
+    const home = mkdtempSync(join(tmpdir(), "ao-child-noflag-"))
+    const repo = join(home, "repo")
+    mkdirSync(repo)
+    process.chdir(repo)
+    process.env.HOME = home
+    process.env.AGENT_OFFICE_URL = url
+    delete process.env.AGENT_OFFICE_CHILD
+    delete process.env.AGENT_OFFICE_PI_CREDENTIALS
+    delete process.env.AGENT_OFFICE_TOKEN
+    for (const [key, value] of Object.entries(childEnv)) process.env[key] = value
+
+    const lib = await import("../lib/office.ts")
+    const credentials = { office: url, client_id: "client", access_token: "token-host", refresh_token: "refresh", expires_at: Date.now() + 3600000 }
+    lib.saveCredentials(lib.agentCredentialsPath("host"), credentials)
+    lib.saveAgentPointer(lib.sessionPointerPath("host-session"), "host")
+    lib.saveAgentPointers(repo, repo, "host")
+
+    const { default: extension } = await import("../index.ts")
+    const registered: string[] = []
+    const handlers = new Map<string, Function>()
+    extension({
+      on: (name: string, fn: Function) => handlers.set(name, fn),
+      registerCommand() {},
+      registerTool() {},
+      registerMcpServer(name: string) { registered.push(name) },
+      sendUserMessage() {},
+    } as any)
+    const ctx = { sessionManager: { getSessionId: () => "child-session-no-approval" }, ui: { notify() {} }, isIdle: () => true }
+    await handlers.get("session_start")!({}, ctx)
+    assert.deepEqual(registered, [], `a child with ${JSON.stringify(childEnv)} registered the Office MCP`)
+    assert.deepEqual(office.calls.map((c) => c.path), [], `a child with ${JSON.stringify(childEnv)} called the office`)
+    await handlers.get("session_shutdown")!({}, ctx)
+    await office.close()
+  }
 })
