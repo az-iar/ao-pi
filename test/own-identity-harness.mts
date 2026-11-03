@@ -27,6 +27,10 @@ export async function harness(env: Record<string, string | undefined>) {
   const { default: extension } = await import("../index.ts")
   const start = async (sessionId: string) => {
     const registered: string[] = []
+    // The registered config, headers included: the identity headers ride here as
+    // well as on the client's calls, and a header missing at registration is the
+    // snapshot bug bruno found in ao-opencode#24.
+    const servers = new Map<string, any>()
     const sent: string[] = []
     const notices: string[] = []
     const handlers = new Map<string, Function>()
@@ -36,13 +40,16 @@ export async function harness(env: Record<string, string | undefined>) {
       on: (name: string, fn: Function) => handlers.set(name, fn),
       registerCommand: (name: string, def: any) => commands.set(name, def),
       registerTool: (tool: any) => tools.set(tool.name, tool),
-      registerMcpServer(name: string) { registered.push(name) },
+      registerMcpServer(name: string, config: any) {
+        registered.push(name)
+        servers.set(name, config)
+      },
       unregisterMcpServer() {},
       sendUserMessage: (text: string) => sent.push(text),
     } as any)
     const ctx = { sessionManager: { getSessionId: () => sessionId }, ui: { notify: (text: string) => notices.push(text) }, isIdle: () => true }
     await handlers.get("session_start")!({}, ctx)
-    return { registered, notices, tools, commands, sent, shutdown: () => handlers.get("session_shutdown")!({}, ctx) }
+    return { registered, servers, notices, tools, commands, sent, shutdown: () => handlers.get("session_shutdown")!({}, ctx) }
   }
   return { office, url, home, repo, lib, start }
 }

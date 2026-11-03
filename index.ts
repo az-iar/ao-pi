@@ -314,7 +314,12 @@ export default function agentOffice(pi: ExtensionAPI) {
   // its identity rather than a session approval.
   const officeIdentity = (): Record<string, string> => {
     const headers: Record<string, string> = {}
-    const sessionAgent = sessionId ? loadAgentPointer(sessionPointerPath(sessionId)) : undefined
+    // The pointer is read only when it is what chose the bearer. Under
+    // AGENT_OFFICE_TOKEN or a credentials override the process *is* the token's
+    // agent, so the honest header is none - a stale pointer would name a
+    // different agent and earn a 409 on every call.
+    const pointerChoseCredentials = (speaksAsOwn || approvedHere) && !usingCredentialsOverride && !process.env.AGENT_OFFICE_TOKEN
+    const sessionAgent = pointerChoseCredentials && sessionId ? loadAgentPointer(sessionPointerPath(sessionId)) : undefined
     if (sessionAgent) headers["X-Office-Session-Agent"] = sessionAgent
     if (isChild) {
       // via names the child and the parent it was started from: the parent is
@@ -332,12 +337,20 @@ export default function agentOffice(pi: ExtensionAPI) {
       // unique, findable in the runtime's logs, and never a runtime-specific
       // subagent label. #512 refuses anything outside [a-z0-9._-] with a 400, so
       // the value is normalised here rather than sent raw and rejected.
-      const rawName = process.env.AGENT_OFFICE_CHILD_NAME?.trim() || (sessionId ? `s-${sessionId.replace(/[^0-9a-fA-F]/g, "").slice(0, 8)}` : "")
+      const hex = (sessionId ?? "").replace(/[^0-9a-fA-F]/g, "")
+      // A session id too short to give eight hex characters has no honest name,
+      // so the child sends no via rather than `s-ab`.
+      const rawName = process.env.AGENT_OFFICE_CHILD_NAME?.trim() || (hex.length >= 8 ? `s-${hex.slice(0, 8)}` : "")
+      // Two strips, not one: the leading one keeps the first character a letter
+      // or digit (the office's rule), and the trailing one after the cut keeps a
+      // name from ending in the separator a space or "!" became. Both were found
+      // by the ao-opencode#24 review; the ao-pi normaliser had neither.
       const safeChild = rawName
         .toLowerCase()
         .replace(/[^a-z0-9._-]+/g, "-")
         .replace(/^[^a-z0-9]+/, "")
         .slice(0, 64)
+        .replace(/[^a-z0-9]+$/, "")
       if (parent && safeChild) headers["X-Office-Via"] = `child=${safeChild}; parent=${parent}; runtime=pi`
     }
     return headers
@@ -477,6 +490,13 @@ export default function agentOffice(pi: ExtensionAPI) {
   // host's environment and pointer files but not this, which is the whole point:
   // identity is per session, never per machine or per directory (#476).
   let speaksAsOwn = false
+  // approvedHere is whether this session's own approval chose its credentials,
+  // as opposed to ownsIdentity, which is also true when a token in the
+  // environment or a dispatcher's credentials override does. The identity header
+  // may only name an agent when the *pointer* is what the bearer came from
+  // (sunny, ao-pi#12): with someone else's token the pointer names an agent the
+  // call does not act as, and #508 answers that with a 409 on every call.
+  let approvedHere = false
   // ownsIdentity is whether *this session* may act as an Office agent: it was
   // approved here, it is resuming a session that was, or a dispatcher granted it
   // explicitly (AGENT_OFFICE_PI_CREDENTIALS). The directory pointer and the host
@@ -590,8 +610,10 @@ export default function agentOffice(pi: ExtensionAPI) {
             saveCredentials(credentialsFile, next)
           }
           ownsIdentity = true
+          approvedHere = true
         } catch (err) {
           ownsIdentity = previouslyOwned
+          approvedHere = false
           credentialsFile = previousFile
           throw err
         }
