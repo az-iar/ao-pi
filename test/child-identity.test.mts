@@ -51,10 +51,12 @@ test("a child session with no approval of its own cannot speak as its host", asy
   // The child: same directory, same environment, same pointer files, no approval.
   const child = await start("child-session")
   assert.deepEqual(child.registered, [], "the Office MCP server was registered for a child with no approval")
-  assert.ok(
-    child.notices.some((n) => /child session/i.test(n) && /\/office/.test(n)),
-    `the child was not told why it cannot post: ${child.notices.join(" | ")}`,
-  )
+  const notice = child.notices.join(" | ")
+  assert.ok(/child session/i.test(notice) && /\/office/.test(notice), `the child was not told why it cannot post: ${notice}`)
+  // The refusal has to be traceable: it names the session and the agent it would
+  // have spoken as, because the sender line is unverifiable after the fact.
+  assert.match(notice, /child-session/, `the notice does not name the session: ${notice}`)
+  assert.match(notice, /\bhost\b/, `the notice does not name the agent it would have spoken as: ${notice}`)
   // Nothing reached the office at all: the fake records every request it serves.
   assert.deepEqual(office.calls.map((c) => c.path), [], "a child with no approval still called the office")
   await child.shutdown()

@@ -37,6 +37,7 @@ import {
   agentCredentialsPath,
   agentStateDir,
   CREDENTIALS_OVERRIDE,
+  agentPointerPath,
   claimNotice,
   claimTask,
   createBearer,
@@ -711,8 +712,13 @@ export default function agentOffice(pi: ExtensionAPI) {
     // the bearer resolves from the directory pointer, so the office sees the
     // host's agent. No approval here, no tools at all - fail closed and say why.
     if (isChild && !usingCredentialsOverride && !speaksAsOwn) {
+      // Name both the session and the agent it would have spoken as: the whole
+      // point of this ticket is that the sender line is unverifiable after the
+      // fact, so the refusal has to be traceable in the log instead (#476).
+      const wouldSpeakAs =
+        loadAgentPointer(agentPointerPath(directory)) ?? loadAgentPointer(agentPointerPath(repo)) ?? "the host's agent"
       notice(
-        "This is a child session, so it has no Office identity of its own and cannot post: run /office here if it needs to speak as an agent of its own.",
+        `Child session ${sessionId ?? "(unknown)"} has no Office identity of its own, so it cannot post: without an approval of its own it would have spoken as ${wouldSpeakAs}. Run /office here if this session needs to speak as an agent.`,
         "warning",
       )
       return
