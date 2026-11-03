@@ -332,7 +332,57 @@ export default function agentOffice(pi: ExtensionAPI) {
   // answers nothing, so checkin, call, the MCP registration and office_connect
   // all fail closed instead of each resolving the host's credentials itself.
   const ownedBearer = async () => (ownsIdentity ? auth.bearer() : undefined)
-  const { call, checkin } = createClient(ownedBearer)
+  // officeIdentity is the header set every Office call carries (GH-476): the
+  // agent this *session* was approved as - read from the session's own pointer
+  // and never from the token - and, for a child, the parent it was started from
+  // plus its runtime. The office compares the agent with the token's agent and
+  // refuses a mismatch with 409; it serves a call with no header exactly as
+  // before, which is what a dispatch worker gets, since the runner's grant is
+  // its identity rather than a session approval.
+  const officeIdentity = (): Record<string, string> => {
+    const headers: Record<string, string> = {}
+    // The pointer is read only when it is what chose the bearer. Under
+    // AGENT_OFFICE_TOKEN or a credentials override the process *is* the token's
+    // agent, so the honest header is none - a stale pointer would name a
+    // different agent and earn a 409 on every call.
+    const pointerChoseCredentials = (speaksAsOwn || approvedHere) && !usingCredentialsOverride && !process.env.AGENT_OFFICE_TOKEN
+    const sessionAgent = pointerChoseCredentials && sessionId ? loadAgentPointer(sessionPointerPath(sessionId)) : undefined
+    if (sessionAgent) headers["X-Office-Session-Agent"] = sessionAgent
+    if (isChild) {
+      // via names the child and the parent it was started from: the parent is
+      // the agent this child would otherwise have spoken as, which is the
+      // directory pointer the session inherits. A child with no such pointer has
+      // no parent to name, so it sends no via at all rather than inventing one.
+      const parent = loadAgentPointer(agentPointerPath(directory)) ?? loadAgentPointer(agentPointerPath(repo))
+      // The office accepts child=<name> as lowercase [a-z0-9._-], 1-64 chars, so a
+      // name that cannot be written that way is left out rather than sent broken:
+      // the header would otherwise be refused with 400 and the child could post
+      // nothing at all. AGENT_OFFICE_CHILD_NAME is how a dispatcher names the
+      // child it started; without one the folder it was given is the name it has.
+      // Sunny's rule, one across all three extensions: the launcher's name if it
+      // set one, else s- plus the first 8 hex of this child's own session id -
+      // unique, findable in the runtime's logs, and never a runtime-specific
+      // subagent label. #512 refuses anything outside [a-z0-9._-] with a 400, so
+      // the value is normalised here rather than sent raw and rejected.
+      const hex = (sessionId ?? "").replace(/[^0-9a-fA-F]/g, "")
+      // A session id too short to give eight hex characters has no honest name,
+      // so the child sends no via rather than `s-ab`.
+      const rawName = process.env.AGENT_OFFICE_CHILD_NAME?.trim() || (hex.length >= 8 ? `s-${hex.slice(0, 8)}` : "")
+      // Two strips, not one: the leading one keeps the first character a letter
+      // or digit (the office's rule), and the trailing one after the cut keeps a
+      // name from ending in the separator a space or "!" became. Both were found
+      // by the ao-opencode#24 review; the ao-pi normaliser had neither.
+      const safeChild = rawName
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]+/g, "-")
+        .replace(/^[^a-z0-9]+/, "")
+        .slice(0, 64)
+        .replace(/[^a-z0-9]+$/, "")
+      if (parent && safeChild) headers["X-Office-Via"] = `child=${safeChild}; parent=${parent}; runtime=pi`
+    }
+    return headers
+  }
+  const { call, checkin } = createClient(ownedBearer, officeIdentity)
 
   const sameCredentials = (a: Credentials, b: Credentials) =>
     a.office === b.office && a.client_id === b.client_id && a.access_token === b.access_token && a.refresh_token === b.refresh_token && a.expires_at === b.expires_at
@@ -429,7 +479,9 @@ export default function agentOffice(pi: ExtensionAPI) {
       }
       pi.registerMcpServer("office", {
         url: `${OFFICE}/mcp`,
-        headers: { Authorization: bearerCommand() },
+        // Same identity headers as createClient: a tool call made through this
+        // server has to look like a call made by this session (GH-476).
+        headers: { Authorization: bearerCommand(), ...officeIdentity() },
         description: "Agent Office: check in, read tasks and messages, post journal entries and decisions",
       })
       mcpRegistered = true
