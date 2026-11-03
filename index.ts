@@ -335,7 +335,11 @@ export default function agentOffice(pi: ExtensionAPI) {
     if (sessionId && loadAgentPointer(sessionPointerPath(sessionId)) !== slug) saveAgentPointer(sessionPointerPath(sessionId), slug)
     if (credentialsFile !== target) {
       credentialsFile = target
-      saveAgentPointers(directory, canonical, slug)
+      // Only an approval in this process makes a worktree's pointer its own; a
+      // plain poll or a token handed in the environment switches the file this
+      // session reads, and saveAgentPointers drops the write inside a linked
+      // worktree, so no identity outlives the token that carried it.
+      saveAgentPointers(directory, canonical, slug, approvedHere ? "office" : undefined)
     }
   }
   const dispatchDir = () => agentStateDir(legacyCredentialsFile, "dispatch", ownAgent?.slug ?? locationKey)
@@ -761,7 +765,11 @@ export default function agentOffice(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     lastCtx = ctx
     sessionId = ctx.sessionManager?.getSessionId()
-    if (!usingCredentialsOverride && sessionId) {
+    // A session pointer records an approval made somewhere else and names that
+    // agent's token file, which in an unconnected worktree is the main
+    // checkout's. Such a worktree connects only through its own marked pointer,
+    // so the session pointer is not read there at all.
+    if (!usingCredentialsOverride && sessionId && !isUnconnectedWorktree(directory)) {
       const savedAgent = loadAgentPointer(sessionPointerPath(sessionId))
       if (savedAgent) {
         credentialsFile = agentCredentialsPath(savedAgent)

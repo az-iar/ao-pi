@@ -98,6 +98,33 @@ export function loadAgentPointer(path: string): string | undefined {
   }
 }
 
+// How a workspace pointer was written. Only a pointer written on purpose counts
+// in a linked worktree: the plugin before this rule wrote the worktree's own
+// pointer from the repo-pointer fallback on every poll, so an unmarked pointer
+// there names the main checkout's agent rather than an agent anyone connected
+// this worktree as. The main checkout and plain directories accept either.
+export type PointerVia = "office" | "dispatch"
+
+type Pointer = { agent?: string; via?: string }
+
+function pointerRecord(path: string): Pointer | undefined {
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as Pointer
+  } catch {
+    return undefined
+  }
+}
+
+const viaOf = (record: Pointer | undefined): PointerVia | undefined =>
+  record?.via === "office" || record?.via === "dispatch" ? record.via : undefined
+
+// The slug a pointer names, but only when the pointer was written on purpose.
+export function loadMarkedAgentPointer(path: string): string | undefined {
+  const record = pointerRecord(path)
+  if (!viaOf(record) || typeof record?.agent !== "string") return undefined
+  return record.agent
+}
+
 // The root of the linked worktree that holds `directory`, or undefined for the
 // main checkout, a subdirectory of it, or a directory outside git: there
 // `--absolute-git-dir` and the common dir are the same path. Memoised, because
@@ -116,8 +143,10 @@ export function linkedWorktreeRoot(directory: string): string | undefined {
 }
 
 // A linked worktree nobody connected: it has no agent pointer of its own, so it
-// must not act as the agent of the main checkout it branches from. It resolves
-// no credentials at all -- no repo pointer, no token file shared with the main
+// must not act as the agent of the main checkout it branches from. Only a marked
+// pointer counts here, so a worktree the old plugin gave an implicit pointer to
+// fails closed until someone runs /office in it again. It resolves no
+// credentials at all -- no repo pointer, no token file shared with the main
 // checkout -- however it was started. Running /office there writes the
 // worktree's own pointer and connects it. Whether a workspace may poll and
 // register Office tools at all is the caller's decision, because an environment
@@ -125,7 +154,7 @@ export function linkedWorktreeRoot(directory: string): string | undefined {
 export function isUnconnectedWorktree(directory: string): boolean {
   const root = linkedWorktreeRoot(directory)
   if (!root) return false
-  return !loadAgentPointer(agentPointerPath(root))
+  return !loadMarkedAgentPointer(agentPointerPath(root))
 }
 
 // Small files written under ~/.config must never be observed half-written by
@@ -146,8 +175,8 @@ function writePrivateJson(path: string, value: unknown) {
   }
 }
 
-export function saveAgentPointer(path: string, slug: string) {
-  writePrivateJson(path, { agent: slug })
+export function saveAgentPointer(path: string, slug: string, via?: PointerVia) {
+  writePrivateJson(path, via ? { agent: slug, via } : { agent: slug })
 }
 
 // The workspace pointer is keyed by the exact cwd; the repo pointer by the
@@ -156,13 +185,20 @@ export function saveAgentPointer(path: string, slug: string) {
 // linked worktree the repo pointer belongs to the main checkout, so connecting
 // the worktree writes the worktree's own pointer only (at its root too, so a
 // subdirectory of the worktree resolves the same); the main checkout keeps the
-// agent it was connected as.
-export function saveAgentPointers(directory: string, canonical: string | undefined, slug: string) {
+// agent it was connected as. A linked worktree's pointer is written only on
+// purpose -- an approval in the worktree, or a dispatcher adopting it -- and
+// every other write there is dropped: a poll or an identity handed in through
+// the environment must not leave a pointer behind that outlives it.
+export function saveAgentPointers(directory: string, canonical: string | undefined, slug: string, via?: PointerVia) {
   const worktreeRoot = linkedWorktreeRoot(directory)
+  if (worktreeRoot && !via) return
   const paths = new Set([agentPointerPath(directory)])
   if (worktreeRoot) paths.add(agentPointerPath(worktreeRoot))
   else if (canonical) paths.add(agentPointerPath(canonical))
-  for (const path of paths) if (loadAgentPointer(path) !== slug) saveAgentPointer(path, slug)
+  for (const path of paths) {
+    const current = pointerRecord(path)
+    if (current?.agent !== slug || viaOf(current) !== via) saveAgentPointer(path, slug, via)
+  }
 }
 
 export function saveCredentials(path: string, c: Credentials) {
@@ -171,10 +207,14 @@ export function saveCredentials(path: string, c: Credentials) {
 
 // The workspace's agent pointer names the agent's token file; without one the
 // legacy per-repo file is used. The override file replaces both. An unconnected
-// worktree resolves nothing: both fallbacks belong to the main checkout.
+// worktree resolves nothing: both fallbacks belong to the main checkout. Inside
+// a linked worktree the worktree's own marked pointer is the only one read --
+// never the main checkout's repo pointer, and not an unmarked pointer of an
+// older version left at the worktree or at a subdirectory of it.
 export function resolveCredentials(directory: string, canonical?: string) {
+  const worktreeRoot = linkedWorktreeRoot(directory)
   const legacyCredentialsFile = credentialsPath(directory, canonical)
-  const pointerFile = agentPointerPath(directory)
+  const pointerFile = worktreeRoot ? agentPointerPath(worktreeRoot) : agentPointerPath(directory)
   const repoPointerFile = agentPointerPath(canonical ?? directory)
   if (!CREDENTIALS_OVERRIDE && isUnconnectedWorktree(directory)) {
     // No token file is this worktree's to read, and naming the legacy path here
@@ -189,7 +229,9 @@ export function resolveCredentials(directory: string, canonical?: string) {
   const pointedAgent =
     CREDENTIALS_OVERRIDE
       ? undefined
-      : loadAgentPointer(pointerFile) ?? (repoPointerFile !== pointerFile ? loadAgentPointer(repoPointerFile) : undefined)
+      : worktreeRoot
+        ? loadMarkedAgentPointer(pointerFile)
+        : loadAgentPointer(pointerFile) ?? (repoPointerFile !== pointerFile ? loadAgentPointer(repoPointerFile) : undefined)
   let credentialsFile = pointedAgent ? agentCredentialsPath(pointedAgent) : legacyCredentialsFile
   let credentials = loadCredentials(credentialsFile)
   if (!credentials && !pointedAgent) {
