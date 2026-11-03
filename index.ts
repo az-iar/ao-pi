@@ -419,6 +419,10 @@ export default function agentOffice(pi: ExtensionAPI) {
   const assignedKeys = new Map<string, string>()
   const repo = canonical ?? directory
   const isChild = process.env.AGENT_OFFICE_CHILD === "1"
+  // Whether this session was approved as an agent itself. A child inherits the
+  // host's environment and pointer files but not this, which is the whole point:
+  // identity is per session, never per machine or per directory (#476).
+  let speaksAsOwn = false
 
   const notice = (text: string, level: "info" | "warning" | "error" = "info") => {
     try {
@@ -698,7 +702,20 @@ export default function agentOffice(pi: ExtensionAPI) {
       if (savedAgent) {
         credentialsFile = agentCredentialsPath(savedAgent)
         auth.credentials = loadCredentials(credentialsFile)
+        speaksAsOwn = true
       }
+    }
+    // A child session has its own id, so it has no approval of its own and no
+    // business speaking as whoever approved the host session. Registering the
+    // office MCP without one is what let a pi child post as its host (#476):
+    // the bearer resolves from the directory pointer, so the office sees the
+    // host's agent. No approval here, no tools at all - fail closed and say why.
+    if (isChild && !usingCredentialsOverride && !speaksAsOwn) {
+      notice(
+        "This is a child session, so it has no Office identity of its own and cannot post: run /office here if it needs to speak as an agent of its own.",
+        "warning",
+      )
+      return
     }
     await connectMcp()
     if (pollingAllowed && !pollTimer) {
