@@ -327,8 +327,17 @@ export default function agentOffice(pi: ExtensionAPI) {
       // the header would otherwise be refused with 400 and the child could post
       // nothing at all. AGENT_OFFICE_CHILD_NAME is how a dispatcher names the
       // child it started; without one the folder it was given is the name it has.
-      const child = (process.env.AGENT_OFFICE_CHILD_NAME ?? basename(directory)).trim().toLowerCase()
-      const safeChild = child.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64)
+      // Sunny's rule, one across all three extensions: the launcher's name if it
+      // set one, else s- plus the first 8 hex of this child's own session id -
+      // unique, findable in the runtime's logs, and never a runtime-specific
+      // subagent label. #512 refuses anything outside [a-z0-9._-] with a 400, so
+      // the value is normalised here rather than sent raw and rejected.
+      const rawName = process.env.AGENT_OFFICE_CHILD_NAME?.trim() || (sessionId ? `s-${sessionId.replace(/[^0-9a-fA-F]/g, "").slice(0, 8)}` : "")
+      const safeChild = rawName
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]+/g, "-")
+        .replace(/^[^a-z0-9]+/, "")
+        .slice(0, 64)
       if (parent && safeChild) headers["X-Office-Via"] = `child=${safeChild}; parent=${parent}; runtime=pi`
     }
     return headers
