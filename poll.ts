@@ -157,17 +157,21 @@ async function main(): Promise<number> {
 
   const resolved = resolveCredentials(directory, canonicalRoot(directory))
   if (values.session && values.credentials) throw new Error("choose --session or --credentials, not both")
-  const sessionAgent = values.session ? loadAgentPointer(sessionPointerPath(values.session)) : undefined
-  if (values.session && !sessionAgent) throw new Error(`no Office agent saved for session ${values.session}`)
-  const credentialsFile = values.credentials ? resolve(values.credentials) : sessionAgent ? agentCredentialsPath(sessionAgent) : resolved.credentialsFile
   // A session pointer is not an identity an unconnected worktree may act on. The
   // old plugin wrote one there on every poll, through the repo-pointer fallback,
-  // so it names an approval made in the main checkout: honouring it would check
-  // in as that agent, run the inbox `pig` as it and dispatch its tasks. Refuse it
-  // and fall through to the same exit as a poller with no --session; --credentials
-  // and AGENT_OFFICE_TOKEN still hand an identity over on purpose.
-  const sessionFile = values.session && !resolved.unconnected ? credentialsFile : undefined
-  const explicitFile = values.credentials ? credentialsFile : sessionFile
+  // so it names an approval made in the main checkout. Decide that before the
+  // pointer is read, so no later use can name that agent either: credentialsFile
+  // is what a dispatched or inbox `pig` gets as AGENT_OFFICE_PI_CREDENTIALS, and
+  // handing it the main checkout's agent would undo the refusal for the worker
+  // even while the poller itself runs as the token.
+  const sessionRefused = Boolean(values.session) && resolved.unconnected
+  const sessionAgent = values.session && !sessionRefused ? loadAgentPointer(sessionPointerPath(values.session)) : undefined
+  if (values.session && !sessionRefused && !sessionAgent) throw new Error(`no Office agent saved for session ${values.session}`)
+  const credentialsFile = values.credentials ? resolve(values.credentials) : sessionAgent ? agentCredentialsPath(sessionAgent) : resolved.credentialsFile
+  // A refused session is no explicit file: without AGENT_OFFICE_TOKEN this exits
+  // below as a poller with no --session does, and with one it runs as that token,
+  // handing its workers the same file an unchanged poller there would.
+  const explicitFile = values.credentials ? credentialsFile : sessionAgent ? credentialsFile : undefined
   const { bearer } = createBearer(() => credentialsFileFor(resolved, explicitFile), explicitFile ? loadCredentials(explicitFile) : resolved.credentials)
   if (!(await bearer())) {
     log(

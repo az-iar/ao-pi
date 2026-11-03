@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { execFileSync, spawn, spawnSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -136,26 +136,27 @@ const tokenHelper = (directory: string, env: Record<string, string> = {}) =>
     encoding: "utf8",
   })
 
-const pollEnv = () => {
+const pollEnv = (extra: Record<string, string> = {}) => {
   const env: Record<string, string> = { ...(process.env as Record<string, string>), HOME: home, AGENT_OFFICE_URL: url, AGENT_OFFICE_POLL_MS: "60000" }
   delete env.AGENT_OFFICE_TOKEN
   delete env.AGENT_OFFICE_PI_CREDENTIALS
-  return env
+  return { ...env, ...extra }
 }
 
 const pollScript = fileURLToPath(new URL("../poll.ts", import.meta.url))
 const pollArgs = (directory: string, args: string[]) => ["--experimental-strip-types", "--disable-warning=ExperimentalWarning", pollScript, "--dir", directory, ...args]
 
 // A poller that exits before any Office call may be run synchronously.
-const poller = (directory: string, args: string[] = []) => spawnSync(process.execPath, pollArgs(directory, args), { env: pollEnv(), encoding: "utf8" })
+const poller = (directory: string, args: string[] = [], extra: Record<string, string> = {}) =>
+  spawnSync(process.execPath, pollArgs(directory, args), { env: pollEnv(extra), encoding: "utf8" })
 
 // The fake Office is a server in this process, so a poller that reaches a
 // checkin has to run beside a free event loop: spawnSync would hold every
 // response for as long as the child waits for one, and the checkin would time
 // out instead of answering.
-const pollerAsync = (directory: string, args: string[] = []) =>
+const pollerAsync = (directory: string, args: string[] = [], extra: Record<string, string> = {}) =>
   new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
-    const child = spawn(process.execPath, pollArgs(directory, args), { env: pollEnv() })
+    const child = spawn(process.execPath, pollArgs(directory, args), { env: pollEnv(extra) })
     let stdout = ""
     let stderr = ""
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk))
@@ -358,6 +359,42 @@ test("the cron poller refuses --session in an unconnected worktree", async () =>
     const accepted = await pollerAsync(main, ["--session", "old"])
     assert.equal(accepted.status, 0, accepted.stderr)
     assert.equal(mcpCalls()[0]?.auth, "Bearer access-a")
+  } finally {
+    office.state.openTasks = pending.openTasks
+    office.state.unreadMessages = pending.unreadMessages
+  }
+})
+
+test("a token in an unconnected worktree hands its workers the token's identity, not the session's", async () => {
+  office.calls.length = 0
+  office.state.agentSlug = "env-agent"
+  const { main, worktree } = repoWithWorktree()
+  lib.saveCredentials(lib.agentCredentialsPath("agent-a"), credentials("access-a"))
+  lib.saveAgentPointers(main, main, "agent-a")
+  // The refused session mapping still names agent-a. With AGENT_OFFICE_TOKEN set the
+  // poller runs as that token, and the worker it starts is the loophole: it used to
+  // be handed agent-a's file as AGENT_OFFICE_PI_CREDENTIALS, so the inbox run would
+  // speak as the main checkout's agent behind a token-identified poller.
+  lib.saveAgentPointer(lib.sessionPointerPath("old"), "agent-a")
+  // One unread message starts an inbox worker; no tasks, so nothing is dispatched.
+  const pending = { openTasks: office.state.openTasks, unreadMessages: office.state.unreadMessages }
+  office.state.openTasks = []
+  office.state.unreadMessages = [{ id: "message-token-1", from: "azri", subject: "Handed over" }]
+  // A `pig` that records the credentials file it was started with and does nothing.
+  const pigLog = join(home, "pig-env.log")
+  const pigDir = join(home, "pig-bin")
+  mkdirSync(pigDir, { recursive: true })
+  const pig = join(pigDir, "pig")
+  writeFileSync(pig, `#!/bin/sh\nprintf '%s\\n' "$AGENT_OFFICE_PI_CREDENTIALS" >> ${pigLog}\nexit 0\n`, { mode: 0o755 })
+  rmSync(pigLog, { force: true })
+  try {
+    const result = await pollerAsync(worktree, ["--session", "old"], { AGENT_OFFICE_TOKEN: "token-env", AGENT_OFFICE_PI_BIN: pig })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(mcpCalls()[0]?.auth, "Bearer token-env", "the token is the identity, as it is without --session")
+    const handed = readFileSync(pigLog, "utf8").trim().split("\n").filter(Boolean)
+    assert.equal(handed.length, 1, "one inbox worker ran")
+    assert.notEqual(handed[0], lib.agentCredentialsPath("agent-a"), "the worker was not handed the main checkout's agent")
+    assert.match(handed[0], /\/unconnected\//, "it got the unconnected worktree's own placeholder, which no agent token is written to")
   } finally {
     office.state.openTasks = pending.openTasks
     office.state.unreadMessages = pending.unreadMessages
