@@ -29,6 +29,7 @@ import {
   claimTask,
   createBearer,
   createClient,
+  credentialsFileFor,
   DISPATCH_STALE_MS,
   fromOthers,
   inboxPrompt,
@@ -159,9 +160,14 @@ async function main(): Promise<number> {
   const sessionAgent = values.session ? loadAgentPointer(sessionPointerPath(values.session)) : undefined
   if (values.session && !sessionAgent) throw new Error(`no Office agent saved for session ${values.session}`)
   const credentialsFile = values.credentials ? resolve(values.credentials) : sessionAgent ? agentCredentialsPath(sessionAgent) : resolved.credentialsFile
-  const { bearer } = createBearer(() => credentialsFile, values.credentials || values.session ? loadCredentials(credentialsFile) : resolved.credentials)
+  const explicitFile = values.credentials || values.session ? credentialsFile : undefined
+  const { bearer } = createBearer(() => credentialsFileFor(resolved, explicitFile), explicitFile ? loadCredentials(explicitFile) : resolved.credentials)
   if (!(await bearer())) {
-    log(`not connected for ${directory}: run /office in Pi first, or set AGENT_OFFICE_TOKEN`)
+    log(
+      resolved.unconnected
+        ? `${directory} is a git worktree with no Office agent of its own; run /office there to connect it, or set AGENT_OFFICE_TOKEN`
+        : `not connected for ${directory}: run /office in Pi first, or set AGENT_OFFICE_TOKEN`,
+    )
     return 2
   }
   const { call, checkin } = createClient(bearer)

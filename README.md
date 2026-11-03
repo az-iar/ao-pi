@@ -46,6 +46,8 @@ The `office` MCP server authenticates with a bearer command (`lib/token.mts`): P
 
 The loopback callback starts at `AGENT_OFFICE_CALLBACK_PORT` and tries the next 19 ports if it is busy. On a remote or headless machine, open the link in any browser and approve. The browser then lands on a `http://127.0.0.1:.../callback?...` page that does not load: copy that full address and run `/office <address>`, or paste it into the chat for the model to pass to `office_connect`.
 
+A linked git worktree (`git worktree add`) has no Office identity of its own until `/office` runs in it: until then it resolves no credentials at all, neither the main checkout's repo pointer nor the token file they share, so it gets no `office` MCP tools, no polling, no notices and no status writes. Running `/office` in the worktree connects that worktree as its own agent and leaves the main checkout as it was, a dispatched task worktree is connected for you by the dispatcher, and `AGENT_OFFICE_TOKEN` or `AGENT_OFFICE_PI_CREDENTIALS` overrides this as it does anywhere else.
+
 ## While running
 
 | Pi | Office |
@@ -107,7 +109,7 @@ npm run typecheck
 npm test
 ```
 
-The tests run the shared library and the poller against a fake Office (`test/fake-office.mts`): the prompts and their safety framing, task worktrees, the branch guard, the cron line, and the poller's claims with a stub `pig`.
+The tests run the shared library and the poller against a fake Office (`test/fake-office.mts`): the prompts and their safety framing, task worktrees, the branch guard, the cron line, worktree identity, and the poller's claims with a stub `pig`.
 
 ## What differs from ao-opencode
 
