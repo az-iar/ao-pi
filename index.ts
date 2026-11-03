@@ -412,6 +412,16 @@ export default function agentOffice(pi: ExtensionAPI) {
   let working = false
   let heartbeat: ReturnType<typeof setInterval> | undefined
   let pollTimer: ReturnType<typeof setInterval> | undefined
+
+  // Polling starts in two places and must behave identically in both: a session
+  // that boots owning an identity, and one that approves mid-session (#476
+  // follow-up). poll() itself fails closed while the session owns nothing.
+  function startPolling() {
+    if (!pollingAllowed || pollTimer) return
+    pollTimer = setInterval(() => void poll(), pollInterval)
+    pollTimer.unref()
+    void poll()
+  }
   let queue = Promise.resolve()
   let lastPollAt: number | undefined
   let lastPollError: string | undefined
@@ -546,6 +556,11 @@ export default function agentOffice(pi: ExtensionAPI) {
           credentialsFile = previousFile
           throw err
         }
+        // The approval is this session's identity now, so it starts what a
+        // session with one starts at boot: polling. Without this a session that
+        // boots unowned and then approves connects but never picks up its inbox
+        // or sends heartbeats until it restarts (#476 follow-up).
+        startPolling()
         try {
           return await connectedSummary(true)
         } finally {
@@ -760,11 +775,7 @@ export default function agentOffice(pi: ExtensionAPI) {
       return
     }
     await connectMcp()
-    if (pollingAllowed && !pollTimer) {
-      pollTimer = setInterval(() => void poll(), pollInterval)
-      pollTimer.unref()
-      void poll()
-    }
+    startPolling()
   })
   pi.on("agent_start", async (_event, ctx) => {
     lastCtx = ctx
