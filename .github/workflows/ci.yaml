@@ -20,9 +20,12 @@ concurrency:
 
 jobs:
   test:
-    # The tests talk to a loopback fake office (test/fake-office.mts) and open no
-    # other network connection, so the shared runner is enough.
-    runs-on: [self-hosted, ai-om]
+    # GitHub-hosted, because this repo has no self-hosted runner registered
+    # (az-iar/ao-pi#9's first run queued forever: the runners in this account are
+    # registered per repository, and the ai-om ones belong to agent-office). The
+    # tests need nothing a hosted image lacks: they are Node, and the only network
+    # they touch is a loopback fake office (test/fake-office.mts).
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
