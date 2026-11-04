@@ -14,9 +14,13 @@ import { basename, dirname, join, sep } from "node:path"
 
 export const OFFICE = (process.env.AGENT_OFFICE_URL?.trim() || "https://office.byma.tech").replace(/\/+$/, "")
 export const CREDENTIALS_OVERRIDE = process.env.AGENT_OFFICE_PI_CREDENTIALS
-const CREDENTIALS_DIR = join(homedir(), ".config", "agent-office", "pi")
-const AGENTS_DIR = join(CREDENTIALS_DIR, "agents")
-const POINTERS_DIR = join(CREDENTIALS_DIR, "workspaces")
+// Resolved at call time, never cached at import: a harness sets $HOME before
+// importing, and anything that stands up more than one harness in a process would
+// otherwise have them all read the first one's records. Preventive: the current
+// suites run one harness per file, so no test depends on this today.
+function credentialsDir(): string {
+  return join(homedir(), ".config", "agent-office", "pi")
+}
 export const REFRESH_EARLY_MS = 5 * 60_000
 const MCP_PROTOCOL = "2026-07-28"
 export const MAX_DISPATCHES = 2
@@ -66,7 +70,7 @@ export function credentialsPath(directory: string, canonical?: string, override 
   const key = scope === "folder" ? directory : (canonical ?? directory)
   const hash = createHash("sha256").update(key).digest("hex").slice(0, 16)
   const slug = basename(key).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40)
-  return join(CREDENTIALS_DIR, `${slug || "workspace"}-${hash}.json`)
+  return join(credentialsDir(), `${slug || "workspace"}-${hash}.json`)
 }
 
 export function loadCredentials(path: string): Credentials | undefined {
@@ -80,15 +84,15 @@ export function loadCredentials(path: string): Credentials | undefined {
 
 export function agentCredentialsPath(slug: string): string {
   const safe = slug.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "agent"
-  return join(AGENTS_DIR, `${safe}.json`)
+  return join(credentialsDir(), "agents", `${safe}.json`)
 }
 
 export function sessionPointerPath(sessionId: string): string {
-  return join(CREDENTIALS_DIR, "sessions", `${workspaceKey(sessionId)}.json`)
+  return join(credentialsDir(), "sessions", `${workspaceKey(sessionId)}.json`)
 }
 
 export function agentPointerPath(directory: string): string {
-  return join(POINTERS_DIR, `${workspaceKey(directory)}.json`)
+  return join(credentialsDir(), "workspaces", `${workspaceKey(directory)}.json`)
 }
 
 export function loadAgentPointer(path: string): string | undefined {
@@ -225,7 +229,7 @@ export function resolveCredentials(directory: string, canonical?: string) {
     // instead: nothing writes it, and a child handed it fails closed on its own
     // token rather than acting as the main checkout's agent. State directories
     // still come from the legacy path, so the dispatch cap stays per agent.
-    const credentialsFile = join(CREDENTIALS_DIR, "unconnected", `${workspaceKey(linkedWorktreeRoot(directory) ?? directory)}.json`)
+    const credentialsFile = join(credentialsDir(), "unconnected", `${workspaceKey(linkedWorktreeRoot(directory) ?? directory)}.json`)
     return { legacyCredentialsFile, pointerFile, repoPointerFile, credentialsFile, credentials: undefined, unconnected: true }
   }
   const pointedAgent =
@@ -890,7 +894,7 @@ export function gitCommonDir(path: string): string | undefined {
 // is what put a worker into a checkout nobody chose, so it runs in a scratch
 // directory with no repository at all.
 export function scratchTaskDir(id: string): string {
-  return join(CREDENTIALS_DIR, "scratch", taskShort(id))
+  return join(credentialsDir(), "scratch", taskShort(id))
 }
 
 export type DispatchTarget = { kind: "worktree"; repo: string } | { kind: "scratch" }
