@@ -15,6 +15,11 @@ export function fakeOffice() {
     tokens: 0,
     openTasks: [{ id: "task-open-1", title: "Open task" }],
     unclaimedTasks: [] as any[],
+    // What get_task answers, per task id. A dispatch re-reads the task before it
+    // claims it, so a test can show the poller's snapshot and the current task
+    // disagreeing (a task cancelled between the two). Absent, get_task falls back
+    // to the copy in openTasks or unclaimedTasks.
+    tasks: {} as Record<string, any>,
     unreadMessages: [
       { id: "message-old-1", from: "azri", subject: "Old one" },
       { id: "message-old-2", from: "azri", subject: "Old two" },
@@ -60,7 +65,23 @@ export function fakeOffice() {
       if (body.method?.startsWith("notifications/")) return res.writeHead(202).end()
       if (body.method === "tools/list") return result({ tools: [{ name: "checkin", description: "Check in", inputSchema: { type: "object", properties: {} } }] })
       if (body.method === "tools/call") {
-        if (body.params.arguments?.status) state.workStatus = body.params.arguments.status
+        const tool = String(body.params?.name ?? "")
+        const args = body.params?.arguments ?? {}
+        const structured = (value: unknown) => result({ content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value })
+        // The task tools a dispatch drives: get_task answers the current state,
+        // and update_task moves it, so a second read agrees with the write.
+        if (tool === "get_task") {
+          const id = String(args.task_id ?? "")
+          const found = state.tasks[id] ?? [...state.openTasks, ...state.unclaimedTasks].find((item: any) => String(item?.id ?? item?.task_id) === id)
+          return structured({ task: found ?? { id, status: "todo" } })
+        }
+        if (tool === "update_task") {
+          const task = state.tasks[String(args.task_id ?? "")]
+          if (task && typeof args.status === "string") task.status = args.status
+          return structured({ ok: true, task_id: args.task_id, status: args.status })
+        }
+        if (tool === "ack_task" || tool === "accept_task") return structured({ ok: true, task_id: args.task_id })
+        if (args.status) state.workStatus = args.status
         const data = {
           agent: { slug: state.agentSlug, name: state.agentName, work_status: state.workStatus },
           pending: { open_tasks: state.openTasks, unclaimed_team_tasks: state.unclaimedTasks, unread_messages: state.unreadMessages },
