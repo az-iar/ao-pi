@@ -154,6 +154,52 @@ test("a mismatched legacy record is not copied forward", () => {
   )
 })
 
+// ao-pi#48 (bruno): the refusal above returned undefined while the shared record
+// was all there was, so a refusal that fell through to the legacy read stayed
+// invisible - and falling through is not a smaller refusal, it is the identity:
+// the legacy record is copied forward, retires itself and becomes the record every
+// later read sees. The legacy record is written for every case here and names this
+// session, so a fall through gated on the legacy record naming the requested
+// session has something to hand back; a fixture with no session field would keep
+// such a fall through green. Its effects are what is asserted - the return value,
+// and both files byte for byte - because whether the legacy file was read is not
+// observable, and a refusal that hands the legacy record back is a preference, not
+// a rule. Asserted on the files as well as the return value, because a promotion
+// can hand back the same agent a refusal would have withheld.
+const noFallThrough = (id: string, session: unknown) => {
+  // Distinct agents: a fall through returns the legacy agent, so a refusal and a
+  // promotion cannot be confused in the message.
+  recordNaming(id, session, "other-session-agent")
+  const sharedPath = sessionPointerPath(id)
+  const sharedBefore = readFileSync(sharedPath, "utf8")
+  const legacyPath = legacySessionPointerPath(id)
+  mkdirSync(dirname(legacyPath), { recursive: true })
+  writeFileSync(legacyPath, JSON.stringify({ agent: "pi", session: id }, null, 2) + "\n", { mode: 0o600 })
+  const legacyBefore = readFileSync(legacyPath, "utf8")
+
+  const { result, warnings: seen } = refused(() => sessionAgentOf(id))
+  assert.equal(result, undefined, `a refused shared record fell through to the legacy record and returned ${String(result)}`)
+  const mismatch = mismatches(seen)
+  assert.equal(mismatch.length, 1, `the refusal was not reported once: ${seen.join(" | ")}`)
+  assert.ok(mismatch[0].includes(id), `the warning does not name the session it was fetched by: ${mismatch[0]}`)
+  // The legacy file is neither consumed (unlinked after a successful copy) nor
+  // rewritten: a promotion both overwrites the shared record and retires it.
+  assert.equal(existsSync(legacyPath), true, "the refused read consumed the legacy record")
+  assert.equal(readFileSync(legacyPath, "utf8"), legacyBefore, "the refused read rewrote the legacy record")
+  // No new shared record: the refused one is still there, byte for byte, and still
+  // names the session it was written for rather than this one.
+  assert.equal(readFileSync(sharedPath, "utf8"), sharedBefore, "the refused read wrote the legacy agent into the shared record")
+  assert.equal(JSON.parse(readFileSync(sharedPath, "utf8")).session, session, "the shared record was re-written for this session")
+}
+
+test("a shared record refused for a mismatched session does not fall through to the legacy record", () => {
+  noFallThrough("session-no-fallthrough-mismatch", "session-someone-else")
+})
+
+test("a shared record refused for a wrong-typed session does not fall through to the legacy record", () => {
+  noFallThrough("session-no-fallthrough-wrong-type", 123)
+})
+
 // ao-opencode#41 (bruno): a `session` field that is present but not a string was
 // read as "no field" and honoured for every session, so "fail closed" was false.
 // The refusal is a mismatch like any other, and the value it logs is quoted: a
