@@ -158,11 +158,14 @@ test("a mismatched legacy record is not copied forward", () => {
 // was all there was, so a refusal that fell through to the legacy read stayed
 // invisible - and falling through is not a smaller refusal, it is the identity:
 // the legacy record is copied forward, retires itself and becomes the record every
-// later read sees. The legacy pair is written for every case here so the fall
-// through has something to hand back: a refusal that consults the legacy read is a
-// preference, not a rule. Asserted on the files as well as the return value,
-// because a promotion can hand back the same agent a refusal would have withheld
-// (the legacy record has no session field, so it is honoured for any session).
+// later read sees. The legacy record is written for every case here and names this
+// session, so a fall through gated on the legacy record naming the requested
+// session has something to hand back; a fixture with no session field would keep
+// such a fall through green. Its effects are what is asserted - the return value,
+// and both files byte for byte - because whether the legacy file was read is not
+// observable, and a refusal that hands the legacy record back is a preference, not
+// a rule. Asserted on the files as well as the return value, because a promotion
+// can hand back the same agent a refusal would have withheld.
 const noFallThrough = (id: string, session: unknown) => {
   // Distinct agents: a fall through returns the legacy agent, so a refusal and a
   // promotion cannot be confused in the message.
@@ -171,7 +174,7 @@ const noFallThrough = (id: string, session: unknown) => {
   const sharedBefore = readFileSync(sharedPath, "utf8")
   const legacyPath = legacySessionPointerPath(id)
   mkdirSync(dirname(legacyPath), { recursive: true })
-  writeFileSync(legacyPath, JSON.stringify({ agent: "pi" }, null, 2) + "\n", { mode: 0o600 })
+  writeFileSync(legacyPath, JSON.stringify({ agent: "pi", session: id }, null, 2) + "\n", { mode: 0o600 })
   const legacyBefore = readFileSync(legacyPath, "utf8")
 
   const { result, warnings: seen } = refused(() => sessionAgentOf(id))
