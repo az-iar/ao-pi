@@ -3,12 +3,13 @@
 // shape — a guard that existed but was not in the path — so these tests pin the
 // logic *and* the wiring.
 import assert from "node:assert/strict"
-import { mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, realpathSync, statSync, utimesSync, writeFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
 import { mkdtempSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
-import { acquireWorkScope, DISPATCH_STALE_MS, releaseWorkScope, sandboxDecision, stillDispatchable, workScopeKey } from "../lib/office.ts"
+import { acquireWorkScope, DISPATCH_STALE_MS, releaseWorkScope, sandboxArgs, sandboxAvailable, sandboxDecision, stillDispatchable, workScopeKey, workerSandboxPaths } from "../lib/office.ts"
 
 const lockDir = () => join(mkdtempSync(join(tmpdir(), "ao-scope-")), "locks")
 
@@ -99,4 +100,64 @@ test("a worker is sandboxed where it can be, opted out of deliberately, and requ
     assert.deepEqual(sandboxDecision(on, true), { on: true, required: true }, on)
     assert.deepEqual(sandboxDecision(on, false), { on: false, required: true }, on)
   }
+})
+
+// rodri's must-fix on ao-pi#4: a `=1` refusal has to happen before the claim and
+// before any git work, or it leaves the task flipped to in_progress and a worktree
+// behind - the litter the refusal exists to avoid.
+test("the sandbox refusal comes before the claim and the worktree", () => {
+  const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8")
+  const start = source.indexOf("const dispatchTask = async (id: string) => {")
+  const end = source.indexOf("const pumpDispatch = () => {")
+  const body = source.slice(start, end)
+  const decideAt = body.indexOf("sandboxDecision(")
+  const claimAt = body.indexOf("await claimTask(call, id)")
+  const worktreeAt = body.indexOf("await addWorktree(")
+  assert.ok(decideAt > 0 && claimAt > decideAt, "the sandbox decision comes before the claim")
+  assert.ok(worktreeAt > decideAt, "and before any worktree is made")
+})
+
+// The other half: default-on must not break a worker's token refresh. The
+// credentials file is written beside itself (temp file plus rename), so the
+// directory has to be a writable bind inside the sandbox.
+test("the sandbox makes the worker's credentials directory writable", () => {
+  const root = mkdtempSync(join(tmpdir(), "ao-cred-bind-"))
+  const agents = join(root, "agents")
+  mkdirSync(agents, { recursive: true })
+  const worktree = join(root, "worktree")
+  mkdirSync(worktree, { recursive: true })
+  const credentials = join(agents, "agent.json")
+  writeFileSync(credentials, "{}")
+  const paths = workerSandboxPaths(worktree, credentials)
+  assert.equal(paths.credentials, realpathSync(agents), "the bind is the file's own directory")
+  const args = sandboxArgs(paths)
+  const writable = args.reduce<string[]>((out, arg, i) => (arg === "--bind" ? [...out, args[i + 1]] : out), [])
+  assert.ok(writable.includes(paths.credentials!), `credentials dir is writable, got ${JSON.stringify(writable)}`)
+  // No credentials file named, no extra bind: the tight default stays tight.
+  assert.equal(workerSandboxPaths(worktree).credentials, undefined)
+})
+
+// And the claim above, for real: a sandboxed process writes the credentials file
+// where the worker would, and is refused outside its mounts.
+test("a real sandboxed write to the credentials directory succeeds, and outside it does not", { skip: !sandboxAvailable() }, () => {
+  const root = mkdtempSync(join(tmpdir(), "ao-sandbox-run-"))
+  const agents = join(root, "agents")
+  const outside = join(root, "outside")
+  mkdirSync(agents, { recursive: true })
+  mkdirSync(outside, { recursive: true })
+  // sandboxArgs always binds the worktree and its git dir: give the fake ones.
+  mkdirSync(join(root, ".git"), { recursive: true })
+  writeFileSync(join(agents, "agent.json"), JSON.stringify({ access_token: "old" }))
+  const paths = workerSandboxPaths(root, join(agents, "agent.json"))
+  const args = sandboxArgs(paths)
+
+  const write = (target: string) =>
+    spawnSync("bwrap", [...args, "/bin/sh", "-c", `printf new > ${target}`], { encoding: "utf8" })
+
+  const inside = write(join(agents, "agent.json"))
+  assert.equal(inside.status, 0, `writing the credentials file inside the sandbox failed: ${inside.stderr}`)
+  assert.equal(readFileSync(join(agents, "agent.json"), "utf8"), "new", "the refresh reached the real file")
+
+  const escaped = write(outside)
+  assert.notEqual(escaped.status, 0, "a sandboxed worker must not write outside its mounts")
 })

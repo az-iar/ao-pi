@@ -786,6 +786,10 @@ export type SandboxPaths = {
   gitDir: string
   // Pi's own state, which it writes on every turn.
   piState: string
+  // The directory holding the Office agent's credentials file: a worker refreshes
+  // its token mid-run and writes the file beside itself, so the directory (not the
+  // file) is what has to be writable - the write is a temp file plus a rename.
+  credentials?: string
   // Caches that must stay warm, or every dispatch re-downloads.
   caches: string[]
 }
@@ -804,6 +808,10 @@ export function sandboxArgs(paths: SandboxPaths): string[] {
   bindIfPresent("--ro-bind", join(paths.gitDir, "config"))
   bindIfPresent("--ro-bind", join(paths.gitDir, "hooks"))
   bindIfPresent("--bind", paths.piState)
+  // A worker's token refresh has to be able to save (bruno on ao-pi#4, rodri's
+  // must-fix): without this a sandboxed worker reads the credentials and cannot
+  // write the refreshed ones back.
+  if (paths.credentials) bindIfPresent("--bind", paths.credentials)
   for (const cache of paths.caches) bindIfPresent("--bind", cache)
   return args
 }
@@ -846,11 +854,12 @@ export const SANDBOX_BIN = "bwrap"
 // gitCommonDir answers an ABSOLUTE path, so it must not be joined onto the worktree:
 // path.join does not reset on an absolute segment, and the missing bind source makes
 // bwrap refuse to start - every dispatch fails with the flag on (neo, ao-pi#22).
-export function workerSandboxPaths(worktree: string): SandboxPaths {
+export function workerSandboxPaths(worktree: string, credentialsFile?: string): SandboxPaths {
   return {
     worktree,
     gitDir: gitCommonDir(worktree) ?? join(worktree, ".git"),
     piState: join(homedir(), ".config", "pig", "agent"),
+    credentials: credentialsFile ? dirname(credentialsFile) : undefined,
     caches: [join(homedir(), ".npm"), join(homedir(), ".cache", "go-build"), join(homedir(), "go", "pkg", "mod")],
   }
 }

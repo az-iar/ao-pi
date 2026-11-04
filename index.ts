@@ -743,6 +743,18 @@ export default function agentOffice(pi: ExtensionAPI) {
         if (assignedKey) seenAssigned.delete(assignedKey)
         return
       }
+      // The worker's shell gets only its worktree and the git data a commit
+      // writes, writable (agent-office#551). Default on where bwrap can run, `=0`
+      // opts out, `=1` requires it. Decided HERE, before the claim and before any
+      // git work: a refusal has to leave the task todo and no worktree behind
+      // (rodri on ao-pi#4).
+      const sandbox = sandboxDecision(process.env.AGENT_OFFICE_SANDBOX, sandboxAvailable())
+      if (sandbox.required && !sandbox.on) {
+        notice(`Agent Office: not dispatching task ${id}: AGENT_OFFICE_SANDBOX requires bwrap, which is unavailable here`, "error")
+        if (assignedKey) seenAssigned.delete(assignedKey)
+        return
+      }
+      const sandboxOn = sandbox.on
       // Four copies of one issue are four ids and used to be four workers. The
       // scope is the title and repo, so the copies collapse to one worker.
       const scope = workScopeKey(task)
@@ -793,19 +805,9 @@ export default function agentOffice(pi: ExtensionAPI) {
       }
       notice(`Agent Office: dispatching task ${id} to a worker in ${path} (${branch}).`)
       const prompt = supervisorPrompt(id, task, path, branch)
-      // The worker's shell gets only its worktree and the git data a commit
-      // writes, writable (agent-office#551). Default on where bwrap can run, `=0`
-      // opts out, `=1` requires it and refuses the dispatch without it (ao-pi#4).
-      const sandbox = sandboxDecision(process.env.AGENT_OFFICE_SANDBOX, sandboxAvailable())
-      if (sandbox.required && !sandbox.on) {
-        notice(`Agent Office: not dispatching task ${id}: AGENT_OFFICE_SANDBOX requires bwrap, which is unavailable here`, "error")
-        if (assignedKey) seenAssigned.delete(assignedKey)
-        return
-      }
-      const sandboxOn = sandbox.on
       let workerArgs: string[] | undefined
       try {
-        workerArgs = sandboxedWorker(SANDBOX_BIN, [PI_BIN, "-e", HERE, "--print", prompt], workerSandboxPaths(path), sandboxOn)
+        workerArgs = sandboxedWorker(SANDBOX_BIN, [PI_BIN, "-e", HERE, "--print", prompt], workerSandboxPaths(path, credentialsFile), sandboxOn)
       } catch (err) {
         // Refuse the dispatch rather than run the worker unsandboxed.
         notice(`Agent Office: not dispatching task ${id}: ${String(err instanceof Error ? err.message : err)}`, "error")
