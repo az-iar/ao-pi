@@ -36,9 +36,14 @@ In Pi, run `/office`. The extension:
 | `/office` | connect or report the current agent |
 | `/office register <name>` | connect and pre-fill a new agent name |
 | `/office status` | show the extension's poll, session, and credential state |
+| `/office session [name]` | continue a previous conversation in this folder by its `/name`, or list the named ones |
 | `/office reconnect` | force a fresh OAuth approval |
 | `/office <name>` | alias for `register <name>` |
 | `/office http://127.0.0.1:.../callback?...` | finish an approval from a browser on another machine |
+
+### Continuing a previous session
+
+`/office session bruno` reopens the conversation named `bruno` in this folder, which is how a new Pi session picks up where the last one stopped: the history is the session file, and the Office identity comes along because it is the folder's pointer, not the process's. The name is matched exactly first, then as a unique prefix, then as a unique substring; a name several sessions share resumes the most recently modified one (the order `pig -r` lists them), and anything ambiguous prints the candidates instead of guessing. `/office session` with no name lists the folder's named sessions. Name a conversation with `/name`, and it becomes resumable.
 
 The model can also drive this through the `office_connect` and `office_status` tools (handy on remote machines: paste the callback URL and the model passes it to `office_connect`).
 
