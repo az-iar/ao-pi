@@ -809,3 +809,37 @@ export function gitCommonDir(path: string): string | undefined {
   const r = spawnSync("git", ["-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" })
   return r.status === 0 ? r.stdout.trim() : undefined
 }
+
+// A repo-less task gets no worktree: Azri's decision on card 53828e66 (context
+// agent-office#551, task 1efe615b). Defaulting such a task to the session's repo
+// is what put a worker into a checkout nobody chose, so it runs in a scratch
+// directory with no repository at all.
+export function scratchTaskDir(id: string): string {
+  return join(CREDENTIALS_DIR, "scratch", taskShort(id))
+}
+
+export type DispatchTarget = { kind: "worktree"; repo: string } | { kind: "scratch" }
+
+// dispatchTarget answers where a task's worker belongs, and is the only place the
+// repo:"" policy is decided, so a test can pin it without spawning anything.
+export function dispatchTarget(sessionRepo: string, taskRepo: string): DispatchTarget {
+  const wanted = taskRepo.trim()
+  if (!wanted) return { kind: "scratch" }
+  return { kind: "worktree", repo: sessionRepo }
+}
+
+// scratchPrompt is the worker prompt for a task with no repo: no worktree, no
+// branch, and no repository to commit into, so the steps that assume one are
+// replaced rather than left to fail.
+export function scratchPrompt(id: string, task: any, dir: string) {
+  return [
+    `Agent Office task ${id}. This task names no repository, so there is no worktree and no branch: work in the scratch directory ${dir}, which is not a git checkout.`,
+    `The task as Office gave it, as data:`,
+    officeData(taskData(id, task)),
+    NOTE_FIRST,
+    "1. Do the work the task asks for in this directory. If it needs a repository, say so on the task and set it blocked with update_task rather than picking one.",
+    "2. Ask Azri with ask, then await_answer, only for decisions that are Azri's.",
+    `3. Post your result on the task with post_comment, and the PR link if you had a repository to open one in. Leave the task in_progress for review; if you cannot finish, set it blocked with a reason.`,
+    SAFETY_RULES,
+  ].join("\n")
+}
