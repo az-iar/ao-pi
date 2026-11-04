@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { test } from "node:test"
 import { fakeOffice } from "./fake-office.mts"
 
@@ -79,7 +79,7 @@ test("approving as a new agent does not overwrite the previous agent's token", a
   assert.notEqual(JSON.parse(readFileSync(join(agents, "pi.json"), "utf8")).access_token, "old-a")
   assert.equal(JSON.parse(readFileSync(pointer, "utf8")).agent, "pi")
   const sessionKey = createHash("sha256").update("approval-session").digest("hex").slice(0, 16)
-  assert.equal(JSON.parse(readFileSync(join(config, "sessions", `${sessionKey}.json`), "utf8")).agent, "pi")
+  assert.equal(JSON.parse(readFileSync(join(dirname(config), "sessions", `${sessionKey}.json`), "utf8")).agent, "pi")
   assert.deepEqual(readdirSync(config).filter((file) => file.startsWith("pending-")), [])
   for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, { isIdle: () => true, ui: { notify() {} } })
   await office.close()

@@ -87,8 +87,56 @@ export function agentCredentialsPath(slug: string): string {
   return join(credentialsDir(), "agents", `${safe}.json`)
 }
 
+// One directory per HOST, not per runtime (agent-office#560): a session id is
+// globally unique and the identity travels with the session, so the three plugins
+// agree on who a session is.
 export function sessionPointerPath(sessionId: string): string {
+  return join(dirname(credentialsDir()), "sessions", `${workspaceKey(sessionId)}.json`)
+}
+
+// Where the previous version kept it: read once so a live session keeps its
+// identity across the move, then retired.
+export function legacySessionPointerPath(sessionId: string): string {
   return join(credentialsDir(), "sessions", `${workspaceKey(sessionId)}.json`)
+}
+
+// saveSessionAgent writes an approval into the shared directory atomically (temp
+// plus rename) with the runtime recorded, because three plugins can write it
+// concurrently and a half-written record reads as "no identity" (agent-office#560).
+export function saveSessionAgent(sessionId: string, slug: string) {
+  const path = sessionPointerPath(sessionId)
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+  const tmp = `${path}.${process.pid}.tmp`
+  writeFileSync(tmp, JSON.stringify({ agent: slug, runtime: "pi", at: Date.now() }, null, 2) + "\n", { mode: 0o600 })
+  renameSync(tmp, path)
+}
+
+// sessionAgentOf reads a session's approval: the shared record, else the legacy one
+// copied forward and retired. Deleting the shared record is the revoke, so the
+// legacy file must not survive the copy (agent-office#560).
+export function sessionAgentOf(sessionId: string | undefined): string | undefined {
+  if (!sessionId) return undefined
+  const current = loadAgentPointer(sessionPointerPath(sessionId))
+  if (current) return current
+  const legacyPath = legacySessionPointerPath(sessionId)
+  const legacy = loadAgentPointer(legacyPath)
+  if (!legacy) return undefined
+  try {
+    saveSessionAgent(sessionId, legacy)
+  } catch (err) {
+    const code = (err as { code?: string }).code
+    if (code !== "EROFS" && code !== "EACCES") {
+      console.warn(`[agent-office] could not copy session ${sessionId}'s legacy approval forward: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    return legacy
+  }
+  try {
+    unlinkSync(legacyPath)
+  } catch (err) {
+    // A copy that worked and a retire that did not leaves the zombie identity.
+    console.warn(`[agent-office] could not retire session ${sessionId}'s legacy approval: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  return legacy
 }
 
 export function agentPointerPath(directory: string): string {
