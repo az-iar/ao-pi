@@ -244,7 +244,12 @@ test("/office in a worktree connects that worktree alone", async (t) => {
   const link = approval.content[0].text.match(/https?:\/\/\S+/)?.[0]
   assert.ok(link, "the approval link is returned")
   await fetch(link, { redirect: "follow" })
-  await waitFor(() => worktreeSession.mcp.has("office"))
+  // Wait for the thing this test is about, not for a process-global signal.
+  // `mcp.has("office")` can already be true from an earlier session in this
+  // same process, so it returned immediately and the assertions below ran
+  // before this approval had written anything — the race that made this test
+  // fail on CI while passing alone (agent-office#540 thread, ao-pi#15 fallout).
+  await waitFor(() => lib.loadMarkedAgentPointer(lib.agentPointerPath(worktree)) === "agent-b")
 
   // The approval writes the worktree's own pointer, marked as written here.
   assert.equal(lib.isUnconnectedWorktree(worktree), false)
