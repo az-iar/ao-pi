@@ -458,6 +458,20 @@ export function supervisorPrompt(id: string, task: any, worktree: string, branch
   ].join("\n")
 }
 
+// stillDispatchable is the check between the poller's snapshot and the claim.
+// The snapshot can be minutes old: a task that was todo when the poller read
+// the list may be cancelled, done or blocked by the time a dispatch slot frees
+// up, and claiming it then starts a worker for work nobody wants — the
+// cancelled-task case in agent-office#540, where a worker was dispatched for a
+// task another agent had already abandoned.
+//
+// An absent status reads as todo, which is how the poller's own filter reads it;
+// anything else is reported back so the log says which state stopped it.
+export function stillDispatchable(task: any): { ok: boolean; reason?: string } {
+  const status = String(task?.status ?? "todo").toLowerCase()
+  return status === "todo" ? { ok: true } : { ok: false, reason: status }
+}
+
 export async function claimTask(call: (name: string, args?: Record<string, unknown>) => Promise<unknown>, id: string) {
   for (const method of ["ack_task", "accept_task"]) {
     try {

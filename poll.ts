@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url"
 import {
   acquireDispatch,
   addWorktree,
+  stillDispatchable,
   agentCredentialsPath,
   agentStateDir,
   claimNotice,
@@ -230,6 +231,17 @@ async function main(): Promise<number> {
       const key = itemKey(item, "task")
       try {
         const detail = await call("get_task", { task_id: id }).catch(() => undefined)
+        // The list this id came from is a snapshot: re-read the task and refuse
+        // to claim one that is no longer todo, so a cancelled task cannot start
+        // a worker for work nobody wants.
+        const current = (detail as any)?.task ?? detail
+        const dispatchable = stillDispatchable(current)
+        if (!dispatchable.ok) {
+          failed.add(key)
+          releaseDispatch(dispatchDir, id)
+          log(`task ${id} is ${dispatchable.reason}, not todo: not dispatching`)
+          continue
+        }
         await claimTask(call, id)
         const { path, branch } = await addWorktree(canonicalRoot(directory), id)
         log(`dispatching task ${id} to ${path}`)

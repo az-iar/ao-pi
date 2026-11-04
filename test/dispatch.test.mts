@@ -56,3 +56,18 @@ test("a fresh lock for the same task stays busy", () => {
   writeFileSync(join(dir, lockName(id)), JSON.stringify({ task: id, pid: process.pid, created: Date.now() }))
   assert.equal(acquireDispatch(dir, id), "busy")
 })
+
+// agent-office#540: the poller's task list is a snapshot. A task that was todo
+// when it was read can be cancelled by the time a dispatch slot frees, and
+// claiming it starts a worker for work nobody wants.
+test("a task that stopped being todo is not dispatched", async () => {
+  const { stillDispatchable } = await import("../lib/office.ts")
+  assert.deepEqual(stillDispatchable({ id: "t", status: "todo" }), { ok: true })
+  // An absent status reads as todo, the way the poller's own filter reads it.
+  assert.deepEqual(stillDispatchable({ id: "t" }), { ok: true })
+  for (const status of ["cancelled", "done", "blocked", "in_progress", "CANCELLED"]) {
+    const verdict = stillDispatchable({ id: "t", status })
+    assert.equal(verdict.ok, false, `${status} must not dispatch`)
+    assert.equal(verdict.reason, status.toLowerCase())
+  }
+})
