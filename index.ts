@@ -41,6 +41,7 @@ import { homedir, hostname } from "node:os"
 import { basename, dirname, join, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { type SessionChoice, message as sessionMessage, pickSession } from "./lib/sessions.ts"
+import { watchTask } from "./lib/task-watch.ts"
 import {
   type Credentials,
   acquireDispatch,
@@ -91,6 +92,11 @@ import {
   workScopeKey,
   acquireWorkScope,
 } from "./lib/office.ts"
+
+// How often a running worker's task is re-read while it works: a cancellation has
+// to win over a dispatch already in flight (ao-pi#4), and one get_task a minute
+// per worker (at most two) is cheaper than a worker that finishes unwanted work.
+const WORKER_STATUS_POLL_MS = Number(process.env.AGENT_OFFICE_WORKER_STATUS_POLL_MS ?? 60_000)
 
 const configuredCallbackPort = Number(process.env.AGENT_OFFICE_CALLBACK_PORT ?? 41997)
 // 0 means "let the OS pick": every approval then gets its own ephemeral port,
@@ -144,9 +150,17 @@ function completeCallback(raw: string): { handled: boolean; ok: boolean; message
 }
 
 const MAX_CHILD_OUTPUT = 64_000
-function run(command: string, args: string[], cwd?: string, timeoutMs = 30_000, env: NodeJS.ProcessEnv = process.env): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function run(command: string, args: string[], cwd?: string, timeoutMs = 30_000, env: NodeJS.ProcessEnv = process.env, signal?: AbortSignal): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] })
+    // A worker whose task has been cancelled stops the way a timed-out one does:
+    // SIGTERM, then SIGKILL if it will not go (ao-pi#4: a cancellation has to win
+    // over a dispatch already in flight).
+    const onAbort = () => {
+      child.kill("SIGTERM")
+      setTimeout(() => child.kill("SIGKILL"), 5_000).unref()
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
     let stdout = ""
     let stderr = ""
     const keep = (current: string, chunk: unknown) =>
@@ -163,10 +177,12 @@ function run(command: string, args: string[], cwd?: string, timeoutMs = 30_000, 
     child.stderr.on("data", (chunk) => (stderr = keep(stderr, chunk)))
     child.on("error", (err) => {
       clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
       reject(err)
     })
     child.on("close", (code) => {
       clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
       resolve({ code, stdout, stderr })
     })
   })
@@ -740,10 +756,31 @@ export default function agentOffice(pi: ExtensionAPI) {
     // ao-pi#4: the scratch path did exactly that, and its finished worker was
     // unclaimed to todo and re-dispatched on the next poll).
     const startWorker = async (bin: string, args: string[], cwd: string) => {
-      const result = await run(bin, args, cwd, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile }).catch((err) => {
+      // A cancellation has to win over a dispatch already in flight (ao-pi#4,
+      // #34): the task was read before the claim, and the worker can run for ten
+      // minutes after it. Re-read the task while the worker runs and stop it when
+      // the office has cancelled it - no unclaim, because the worker did start
+      // and the office owns the status it is now in. Cancelled only: a worker
+      // that just marked its own task done may still be pushing or commenting,
+      // and killing it there would abort work that succeeded (vinn on ao-pi#33).
+      const stop = new AbortController()
+      const watch = watchTask({
+        readStatus: async () => {
+          const now = await call("get_task", { task_id: id })
+          return String(((now as any)?.task ?? now)?.status ?? "").toLowerCase()
+        },
+        stops: ["cancelled"],
+        onStop: (status: string) => {
+          notice(`Agent Office: task ${id} is ${status}; stopping its worker.`)
+          stop.abort()
+        },
+        intervalMs: WORKER_STATUS_POLL_MS,
+      })
+      const result = await run(bin, args, cwd, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile }, stop.signal).catch((err) => {
         warn("could not start the worker", { task: id, error: String(err) })
         return undefined
       })
+      watch.stop()
       if (result !== undefined) workerStarted = true
       return result
     }
