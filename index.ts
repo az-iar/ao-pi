@@ -26,9 +26,9 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { Type } from "@earendil-works/pi-ai"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
-import { existsSync, unlinkSync } from "node:fs"
+import { existsSync, readdirSync, realpathSync, unlinkSync } from "node:fs"
 import { createServer } from "node:http"
 import { hostname } from "node:os"
 import { basename, dirname, join, sep } from "node:path"
@@ -67,6 +67,7 @@ import {
   taskID,
   tokenRequest,
   workspaceKey,
+  chooseRepo,
 } from "./lib/office.ts"
 
 const configuredCallbackPort = Number(process.env.AGENT_OFFICE_CALLBACK_PORT ?? 41997)
@@ -703,7 +704,40 @@ export default function agentOffice(pi: ExtensionAPI) {
       const detail = await call("get_task", { task_id: id }).catch(() => undefined)
       const task = (detail as any)?.task ?? detail
       await claimTask(call, id)
-      const { path, branch } = await addWorktree(repo, id, ownAgent?.slug)
+      // Run in the task's repository, not this session's: both dispatch sites used
+      // to pass the process's own repo, so a task in another repo got a worktree
+      // of the wrong one (agent-office#540). A task naming no repo keeps the old
+      // behaviour.
+      let dispatchRepo = repo
+      const wanted = String((task as any)?.repo ?? "").trim()
+      if (wanted) {
+        const remoteOf = (path: string) => {
+          const r = spawnSync("git", ["-C", path, "remote", "get-url", "origin"], { encoding: "utf8" })
+          return r.status === 0 ? r.stdout.trim() : undefined
+        }
+        let beside: { path: string; remote?: string }[] = []
+        try {
+          beside = readdirSync(dirname(repo))
+            .filter((name) => name !== basename(repo))
+            .map((name) => ({ path: join(dirname(repo), name), remote: remoteOf(join(dirname(repo), name)) }))
+        } catch {}
+        const chosen = chooseRepo(wanted, [{ path: repo, remote: remoteOf(repo) }, ...beside])
+        if ("error" in chosen) {
+          notice(`Agent Office: not dispatching task ${id}: ${chosen.error}`, "error")
+          if (assignedKey) seenAssigned.delete(assignedKey)
+          return
+        }
+        dispatchRepo = chosen.path
+      }
+      const { path, branch } = await addWorktree(dispatchRepo, id, ownAgent?.slug)
+      // The worker must run in the worktree dispatch thinks it made, not in
+      // whatever is at that path now.
+      const top = spawnSync("git", ["-C", path, "rev-parse", "--show-toplevel"], { encoding: "utf8" })
+      if (top.status !== 0 || realpathSync(top.stdout.trim()) !== realpathSync(path)) {
+        notice(`Agent Office: not dispatching task ${id}: ${path} is not its own worktree root`, "error")
+        if (assignedKey) seenAssigned.delete(assignedKey)
+        return
+      }
       notice(`Agent Office: dispatching task ${id} to a worker in ${path} (${branch}).`)
       const prompt = supervisorPrompt(id, task, path, branch)
       const result = await run(PI_BIN, ["-e", HERE, "--print", prompt], path, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile }).catch((err) => {
