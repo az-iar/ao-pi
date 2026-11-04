@@ -64,6 +64,7 @@ import {
   MAX_DISPATCHES,
   OFFICE,
   onTaskBranch,
+  readSessionRecord,
   REFRESH_EARLY_MS,
   releaseDispatch,
   releaseWorkScope,
@@ -441,7 +442,16 @@ export default function agentOffice(pi: ExtensionAPI) {
       const current = loadCredentials(target)
       if (!current || !sameCredentials(current, auth.credentials)) saveCredentials(target, auth.credentials)
     }
-    if (sessionId && sessionAgentOf(sessionId) !== slug) saveSessionAgent(sessionId, slug)
+    if (sessionId) {
+      // Skip only a record that already names this agent AND this session. The
+      // session half is the one that matters: a record refused for this id (it
+      // names another session, or no session at all) is not this session's
+      // approval, and leaving it in place makes /office work in this process while
+      // the next start refuses the session again - for as long as the file lives
+      // (bruno on ao-opencode#41).
+      const stored = readSessionRecord(sessionPointerPath(sessionId))
+      if (!(stored?.agent === slug && stored.session === sessionId)) saveSessionAgent(sessionId, slug)
+    }
     if (credentialsFile !== target) {
       credentialsFile = target
       // Only an approval in this process makes a worktree's pointer its own; a
