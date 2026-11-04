@@ -45,6 +45,7 @@ import {
   taskID,
   workspaceKey,
   resolveDispatchRepo,
+  siblingCheckouts,
 } from "./lib/office.ts"
 
 const PI_BIN = process.env.AGENT_OFFICE_PI_BIN || "pig"
@@ -251,21 +252,7 @@ async function main(): Promise<number> {
         const wantedRepo = String((current as any)?.repo ?? "").trim()
         let dispatchRepo = sessionRepo
         if (wantedRepo) {
-          const gitOut = (path: string, args: string[]) => {
-            const r = spawnSync("git", ["-C", path, ...args], { encoding: "utf8" })
-            return r.status === 0 ? r.stdout.trim() : undefined
-          }
-          const chosen = resolveDispatchRepo(sessionRepo, wantedRepo, (root) => {
-            const candidates = [{ path: root, remote: gitOut(root, ["remote", "get-url", "origin"]), commonDir: gitOut(root, ["rev-parse", "--git-common-dir"]) }]
-            try {
-              for (const name of readdirSync(dirname(root))) {
-                const path = join(dirname(root), name)
-                if (path === root) continue
-                candidates.push({ path, remote: gitOut(path, ["remote", "get-url", "origin"]), commonDir: gitOut(path, ["rev-parse", "--git-common-dir"]) })
-              }
-            } catch {}
-            return candidates
-          })
+          const chosen = resolveDispatchRepo(sessionRepo, wantedRepo, siblingCheckouts)
           if ("error" in chosen) {
             log(`not dispatching task ${id}: ${chosen.error}`)
             failed.add(key)
