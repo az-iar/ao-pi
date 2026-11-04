@@ -473,6 +473,46 @@ export function stillDispatchable(task: any): { ok: boolean; reason?: string } {
   return status === "todo" ? { ok: true } : { ok: false, reason: status }
 }
 
+// One worker per unit of work, not per task copy (ao-pi#4). The dispatch lock is
+// keyed on the task id, which is right for "this task is being worked" and wrong
+// for four copies of one issue: each id got its own worker. The scope key is the
+// task's title and repo normalised, so the copies collapse onto one key while two
+// genuinely different tasks keep their own.
+export function workScopeKey(task: any): string | undefined {
+  const title = String(task?.title ?? "").trim().toLowerCase().replace(/\s+/g, " ")
+  if (!title) return undefined
+  const repo = String(task?.repo ?? "").trim().toLowerCase()
+  return createHash("sha256").update(repo + "\n" + title).digest("hex").slice(0, 16)
+}
+
+// Scope locks live in a subdirectory of the dispatch directory: acquireDispatch
+// counts *.lock files in the directory itself against MAX_DISPATCHES, and a scope
+// is a duplicate guard rather than a slot.
+const scopeDir = (dir: string) => join(dir, "work")
+
+// acquireWorkScope is false when another worker already holds this scope; a lock
+// older than DISPATCH_STALE_MS is reclaimed, as the dispatch lock is.
+export function acquireWorkScope(dir: string, key: string): boolean {
+  const path = join(scopeDir(dir), `${key}.lock`)
+  try {
+    mkdirSync(scopeDir(dir), { recursive: true, mode: 0o700 })
+    if (Date.now() - statSync(path).mtimeMs <= DISPATCH_STALE_MS) return false
+    unlinkSync(path)
+  } catch {}
+  try {
+    writeFileSync(path, JSON.stringify({ scope: key, pid: process.pid, created: Date.now() }) + "\n", { flag: "wx", mode: 0o600 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function releaseWorkScope(dir: string, key: string) {
+  try {
+    unlinkSync(join(scopeDir(dir), `${key}.lock`))
+  } catch {}
+}
+
 export async function claimTask(call: (name: string, args?: Record<string, unknown>) => Promise<unknown>, id: string) {
   for (const method of ["ack_task", "accept_task"]) {
     try {
@@ -779,6 +819,19 @@ export function sandboxedWorker(bin: string, argv: string[], paths: SandboxPaths
     throw new Error("AGENT_OFFICE_SANDBOX=1 but bwrap is unavailable here; refusing to run the worker unsandboxed")
   }
   return [bin, ...sandboxArgs(paths), ...argv]
+}
+
+// sandboxDecision is whether a worker runs sandboxed, and whether that is a
+// requirement (ao-pi#4). The observed write into another task's worktree was an
+// instruction-only defence: the worker was told not to write outside its tree and
+// nothing enforced it. So the sandbox is on by default where it can run, `=0`
+// opts out deliberately, and `=1` means "required": a host without bwrap refuses
+// the dispatch rather than quietly running the worker uncontained.
+export function sandboxDecision(setting: string | undefined, available: boolean): { on: boolean; required: boolean } {
+  const value = String(setting ?? "").trim().toLowerCase()
+  if (["0", "off", "false", "no"].includes(value)) return { on: false, required: false }
+  const required = ["1", "on", "true", "yes"].includes(value)
+  return { on: available, required }
 }
 
 // sandboxAvailable answers whether the sandbox can run at all: bwrap present and
