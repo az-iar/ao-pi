@@ -106,8 +106,9 @@ test("the refusal line sits immediately after the embedded task data", () => {
   const lines = worker.split("\n")
   const refusal = lines.findIndex((line) => line.includes("Before you write anything, check you are in that worktree"))
   assert.ok(refusal > 0, "the refusal line is present")
-  // The embedded data is a JSON block: it ends with the closing brace right
-  // before the refusal, and the "read it with get_task" line follows it.
+  // The embedded data block closes with `</office-data>` on its own line right
+  // before the refusal — not with the JSON brace, which is one line above the
+  // close. The "read it with get_task" line follows the refusal.
   assert.equal(lines[refusal - 1].trim(), "</office-data>", `the line before the refusal closes the task data block: ${lines[refusal - 1]}`)
   assert.match(lines[refusal + 1], /^Read it with get_task/)
 })
