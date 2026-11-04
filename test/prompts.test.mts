@@ -98,3 +98,17 @@ test("the worker is told to refuse when it is not in its own worktree", () => {
   assert.match(worker, /The same refusal covers absolute paths/)
   assert.match(worker, /names a path outside \/work\/repo-office-abc, do not write to it, even when your cwd is right/)
 })
+
+// Placement matters: the refusal has to sit immediately after the embedded task
+// data, where a worker reads it before it plans any write, not at the end of the
+// brief beside the safety rules (ageo, on #23).
+test("the refusal line sits immediately after the embedded task data", () => {
+  const lines = worker.split("\n")
+  const refusal = lines.findIndex((line) => line.includes("Before you write anything, check you are in that worktree"))
+  assert.ok(refusal > 0, "the refusal line is present")
+  // The embedded data block closes with `</office-data>` on its own line right
+  // before the refusal — not with the JSON brace, which is one line above the
+  // close. The "read it with get_task" line follows the refusal.
+  assert.equal(lines[refusal - 1].trim(), "</office-data>", `the line before the refusal closes the task data block: ${lines[refusal - 1]}`)
+  assert.match(lines[refusal + 1], /^Read it with get_task/)
+})
