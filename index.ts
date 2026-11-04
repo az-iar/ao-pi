@@ -35,7 +35,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { Type } from "@earendil-works/pi-ai"
 import { spawn, spawnSync } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
-import { existsSync, readdirSync, realpathSync, unlinkSync } from "node:fs"
+import { mkdirSync, existsSync, readdirSync, realpathSync, unlinkSync } from "node:fs"
 import { createServer } from "node:http"
 import { homedir, hostname } from "node:os"
 import { basename, dirname, join, sep } from "node:path"
@@ -80,6 +80,9 @@ import {
   sandboxedWorker,
   SANDBOX_BIN,
   workerSandboxPaths,
+  dispatchTarget,
+  scratchTaskDir,
+  scratchPrompt,
 } from "./lib/office.ts"
 
 const configuredCallbackPort = Number(process.env.AGENT_OFFICE_CALLBACK_PORT ?? 41997)
@@ -723,11 +726,26 @@ export default function agentOffice(pi: ExtensionAPI) {
       const detail = await call("get_task", { task_id: id }).catch(() => undefined)
       const task = (detail as any)?.task ?? detail
       await claimTask(call, id)
-      // Run in the task's repository, not this session's (agent-office#540). The
-      // resolver refuses rather than guessing, and treats linked worktrees of one
-      // repository as one checkout.
+      // A repo-less task gets NO worktree and no repo cwd: Azri's decision on card
+      // 53828e66. Defaulting it to this session's repo is what put a worker in a
+      // checkout nobody chose (agent-office#551), so it runs in a scratch dir.
       const wantedRepo = String((task as any)?.repo ?? "").trim()
+      const target = dispatchTarget(repo, wantedRepo)
       let dispatchRepo = repo
+      if (target.kind === "scratch") {
+        const scratch = scratchTaskDir(id)
+        mkdirSync(scratch, { recursive: true })
+        const result = await run(PI_BIN, ["-e", HERE, "--print", scratchPrompt(id, task, scratch)], scratch, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile }).catch((err) => {
+          warn("could not start the worker", { task: id, error: String(err) })
+          return undefined
+        })
+        if (result === undefined) {
+          if (assignedKey) seenAssigned.delete(assignedKey)
+          return
+        }
+        notice(`Agent Office task ${id} worker exited (${result?.code ?? "error"}). No worktree: the task names no repo.`)
+        return
+      }
       if (wantedRepo) {
         const chosen = resolveDispatchRepo(repo, wantedRepo, siblingCheckouts)
         if ("error" in chosen) {
