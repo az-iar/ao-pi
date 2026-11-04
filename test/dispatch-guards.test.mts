@@ -9,7 +9,7 @@ import { mkdtempSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
-import { acquireWorkScope, DISPATCH_STALE_MS, releaseWorkScope, sandboxArgs, sandboxAvailable, sandboxDecision, stillDispatchable, workScopeKey, workerSandboxPaths } from "../lib/office.ts"
+import { acquireWorkScope, DISPATCH_STALE_MS, releaseWorkScope, sandboxArgs, sandboxAvailable, sandboxDecision, stillDispatchable, unclaimTask, workScopeKey, workerSandboxPaths } from "../lib/office.ts"
 
 const lockDir = () => join(mkdtempSync(join(tmpdir(), "ao-scope-")), "locks")
 
@@ -160,4 +160,28 @@ test("a real sandboxed write to the credentials directory succeeds, and outside 
 
   const escaped = write(outside)
   assert.notEqual(escaped.status, 0, "a sandboxed worker must not write outside its mounts")
+})
+
+// rodri on ao-pi#4: every refusal after the claim used to strand the task. A
+// dispatch that claimed and did not start a worker now hands it back.
+test("a dispatch that gives up after claiming puts the task back to todo", async () => {
+  const calls: Array<{ name: string; args: any }> = []
+  const call = async (name: string, args?: any) => { calls.push({ name, args }); return {} }
+  await unclaimTask(call, "task-1", "the repo did not resolve")
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].name, "update_task")
+  assert.equal(calls[0].args.task_id, "task-1")
+  assert.equal(calls[0].args.status, "todo", "back to the queue, not left in_progress")
+  assert.match(String(calls[0].args.comment), /Dispatch gave up before starting a worker: the repo did not resolve/)
+
+  // A failed update must not turn the dispatch's own error into a second one.
+  await unclaimTask(async () => { throw new Error("office down") }, "task-2", "why")
+})
+
+test("the claim release runs only when no worker started", () => {
+  const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8")
+  const start = source.indexOf("const dispatchTask = async (id: string) => {")
+  const body = source.slice(start, source.indexOf("const pumpDispatch = () => {"))
+  assert.match(body, /if \(claimed && !workerStarted\) await unclaimTask\(call, id, /, "the release is guarded by both flags")
+  assert.ok(body.indexOf("claimed = true") < body.indexOf("await claimTask(call, id)"), "claimed is set as the claim is taken")
 })

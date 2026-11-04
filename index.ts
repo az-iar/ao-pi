@@ -87,6 +87,7 @@ import {
   scratchTaskDir,
   scratchPrompt,
   stillDispatchable,
+  unclaimTask,
   workScopeKey,
   acquireWorkScope,
 } from "./lib/office.ts"
@@ -730,6 +731,9 @@ export default function agentOffice(pi: ExtensionAPI) {
     let workerStarted = false
     // Held until this dispatch ends: one worker per unit of work (ao-pi#4).
     let heldScope: string | undefined
+    // Whether the task was claimed (flipped to in_progress): an abort after that
+    // has to put it back to todo, or the task is stranded and unretryable.
+    let claimed = false
     try {
       const detail = await call("get_task", { task_id: id }).catch(() => undefined)
       const task = (detail as any)?.task ?? detail
@@ -764,6 +768,7 @@ export default function agentOffice(pi: ExtensionAPI) {
         return
       }
       heldScope = scope
+      claimed = true
       await claimTask(call, id)
       // A repo-less task gets NO worktree and no repo cwd: Azri's decision on card
       // 53828e66. Defaulting it to this session's repo is what put a worker in a
@@ -832,6 +837,10 @@ export default function agentOffice(pi: ExtensionAPI) {
       warn("could not dispatch Office task", { task: id, error: String(err) })
       notice(`Agent Office: could not dispatch task ${id}: ${String(err)}`, "error")
     } finally {
+      // A dispatch that claimed the task and did not start a worker hands the task
+      // back: otherwise it sits in_progress with nobody on it and stillDispatchable
+      // refuses every retry (rodri on ao-pi#4).
+      if (claimed && !workerStarted) await unclaimTask(call, id, "no worker started")
       if (heldScope) releaseWorkScope(dispatchDir(), heldScope)
       releaseDispatch(dispatchDir(), id)
       dispatching.delete(id)

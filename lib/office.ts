@@ -522,6 +522,19 @@ export async function claimTask(call: (name: string, args?: Record<string, unkno
   await call("update_task", { task_id: id, status: "in_progress", comment: "Pi dispatched this task to a worker session." })
 }
 
+// unclaimTask puts a task back to todo when a dispatch gives up after claiming it
+// (rodri on ao-pi#4). Every refusal after the claim - a repo that does not resolve,
+// a worktree that is not its own root, a sandbox that cannot start, a worker that
+// never launched - used to leave the task `in_progress` with nobody on it, and
+// stillDispatchable then refused every retry: the same stranding as a cancelled
+// task flipped back, from the other direction. Best effort: the dispatch's own
+// error is what the caller needs to see.
+export async function unclaimTask(call: (name: string, args?: Record<string, unknown>) => Promise<unknown>, id: string, why: string) {
+  try {
+    await call("update_task", { task_id: id, status: "todo", comment: `Dispatch gave up before starting a worker: ${why}` })
+  } catch {}
+}
+
 // A task worktree's own Pi belongs to its dispatched worker: it must not poll
 // the inbox or dispatch, or it would pull Office work into that session.
 export function onTaskBranch(directory: string) {
