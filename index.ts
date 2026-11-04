@@ -30,7 +30,7 @@ import { spawn, spawnSync } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
 import { existsSync, readdirSync, realpathSync, unlinkSync } from "node:fs"
 import { createServer } from "node:http"
-import { hostname } from "node:os"
+import { homedir, hostname } from "node:os"
 import { basename, dirname, join, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import {
@@ -69,6 +69,9 @@ import {
   workspaceKey,
   resolveDispatchRepo,
   siblingCheckouts,
+  sandboxedWorker,
+  SANDBOX_BIN,
+  gitCommonDir,
 } from "./lib/office.ts"
 
 const configuredCallbackPort = Number(process.env.AGENT_OFFICE_CALLBACK_PORT ?? 41997)
@@ -730,7 +733,17 @@ export default function agentOffice(pi: ExtensionAPI) {
       }
       notice(`Agent Office: dispatching task ${id} to a worker in ${path} (${branch}).`)
       const prompt = supervisorPrompt(id, task, path, branch)
-      const result = await run(PI_BIN, ["-e", HERE, "--print", prompt], path, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile }).catch((err) => {
+      // AGENT_OFFICE_SANDBOX=1 runs the worker's shell with only its worktree and
+      // the git data a commit writes writable (agent-office#551).
+      const sandboxOn = process.env.AGENT_OFFICE_SANDBOX === "1"
+      const workerArgs = sandboxedWorker(SANDBOX_BIN, [PI_BIN, "-e", HERE, "--print", prompt], {
+        worktree: path,
+        gitDir: join(path, gitCommonDir(path) ?? ".git"),
+        piState: join(homedir(), ".config", "pig", "agent"),
+        caches: [join(homedir(), ".npm"), join(homedir(), ".cache", "go-build"), join(homedir(), "go", "pkg", "mod")],
+      }, sandboxOn)
+      const [workerBin, ...restArgs] = workerArgs ?? [PI_BIN, "-e", HERE, "--print", prompt]
+      const result = await run(workerBin, restArgs, path, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile }).catch((err) => {
         warn("could not start the worker", { task: id, error: String(err) })
         return undefined
       })

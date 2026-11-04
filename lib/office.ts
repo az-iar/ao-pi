@@ -732,3 +732,49 @@ export function siblingCheckouts(root: string): { path: string; remote?: string;
   } catch {}
   return candidates
 }
+
+// A dispatched worker's shell runs inside a filesystem sandbox: the worktree and
+// the git data a commit writes are the only writable trees, and `.git/config` and
+// `.git/hooks` stay read-only on top because both are ways to run code outside it
+// (agent-office#551: a task body named another repo's worktree and the worker
+// wrote there through bash, which no prompt or tool guard can stop).
+export type SandboxPaths = {
+  worktree: string
+  // The repository's git dir (the common dir for a linked worktree): objects,
+  // refs, logs and FETCH_HEAD all live here and a commit or push writes them.
+  gitDir: string
+  // Pi's own state, which it writes on every turn.
+  piState: string
+  // Caches that must stay warm, or every dispatch re-downloads.
+  caches: string[]
+}
+
+export function sandboxArgs(paths: SandboxPaths): string[] {
+  const args = ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+  // Write access, narrowest last: a later bind overrides an earlier one.
+  args.push("--bind", paths.worktree, paths.worktree)
+  args.push("--bind", paths.gitDir, paths.gitDir)
+  args.push("--ro-bind", join(paths.gitDir, "config"), join(paths.gitDir, "config"))
+  args.push("--ro-bind", join(paths.gitDir, "hooks"), join(paths.gitDir, "hooks"))
+  args.push("--bind", paths.piState, paths.piState)
+  for (const cache of paths.caches) args.push("--bind", cache, cache)
+  return args
+}
+
+// sandboxedWorker answers the argv for a sandboxed worker, or undefined when the
+// sandbox is off or unavailable. AGENT_OFFICE_SANDBOX=1 opts in per host, so a
+// mount-policy regression cannot stop every dispatch at once.
+export function sandboxedWorker(bin: string, argv: string[], paths: SandboxPaths, enabled: boolean): string[] | undefined {
+  if (!enabled) return undefined
+  return [bin, ...sandboxArgs(paths), ...argv].map((part, index) => (index === 0 ? part : part))
+}
+
+export const SANDBOX_BIN = "bwrap"
+
+// gitCommonDir reads a checkout's shared git dir, absolute: a linked worktree's
+// `.git` is a file pointing at `<repo>/.git/worktrees/<name>`, and the directory a
+// commit writes is the common one.
+export function gitCommonDir(path: string): string | undefined {
+  const r = spawnSync("git", ["-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" })
+  return r.status === 0 ? r.stdout.trim() : undefined
+}
