@@ -36,8 +36,6 @@ import {
   inboxPrompt,
   itemKey,
   loadCredentials,
-  loadAgentPointer,
-  sessionPointerPath,
   releaseDispatch,
   releaseNotice,
   resolveCredentials,
@@ -45,6 +43,7 @@ import {
   taskID,
   workspaceKey,
   resolveDispatchRepo,
+  sessionAgentOf,
   siblingCheckouts,
 } from "./lib/office.ts"
 
@@ -168,7 +167,11 @@ async function main(): Promise<number> {
   // handing it the main checkout's agent would undo the refusal for the worker
   // even while the poller itself runs as the token.
   const sessionRefused = Boolean(values.session) && resolved.unconnected
-  const sessionAgent = values.session && !sessionRefused ? loadAgentPointer(sessionPointerPath(values.session)) : undefined
+  // A session approved before the records moved to the host-wide sessions/ still
+  // names its agent here: sessionAgentOf copies that legacy record forward and
+  // retires it, so an unattended cron poll of a pre-upgrade session keeps running
+  // instead of failing until someone resumes that session in Pi.
+  const sessionAgent = values.session && !sessionRefused ? sessionAgentOf(values.session) : undefined
   if (values.session && !sessionRefused && !sessionAgent) throw new Error(`no Office agent saved for session ${values.session}`)
   const credentialsFile = values.credentials ? resolve(values.credentials) : sessionAgent ? agentCredentialsPath(sessionAgent) : resolved.credentialsFile
   // A refused session is no explicit file: without AGENT_OFFICE_TOKEN this exits

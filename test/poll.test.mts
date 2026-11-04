@@ -82,6 +82,35 @@ test("session selection pins poll and child, and unknown sessions fail closed", 
   assert.match(missing.stderr, /no Office agent saved for session/)
 })
 
+// A session approved by the previous version keeps its identity across the move
+// of the records to the host-wide sessions/ directory. Nothing migrates it until
+// something reads it, so the cron poller reading the shared path alone stopped
+// every pre-upgrade session's unattended poll until someone resumed it in Pi
+// (bruno on ao-pi#42). The legacy file is retired with the copy: without that,
+// deleting the shared record no longer revokes the session's identity.
+test("a session approved before the move still polls once, its legacy record copied forward", async () => {
+  reset()
+  const ws = workspace()
+  const config = join(ws.root, ".config", "agent-office", "pi")
+  const legacy = join(config, "sessions")
+  const shared = join(ws.root, ".config", "agent-office", "sessions")
+  const agents = join(config, "agents")
+  mkdirSync(legacy, { recursive: true })
+  mkdirSync(agents, { recursive: true })
+  const session = "session-upgraded"
+  const key = createHash("sha256").update(session).digest("hex").slice(0, 16)
+  writeFileSync(join(legacy, `${key}.json`), JSON.stringify({ agent: "pi" }), { mode: 0o600 })
+  const token = join(agents, "pi.json")
+  writeFileSync(token, JSON.stringify({ office: url, client_id: "c", access_token: "legacy-token", refresh_token: "r", expires_at: Date.now() + 3600000 }))
+
+  const result = await ws.poll(["--session", session])
+  assert.equal(result.code, 0, result.stderr)
+  assert.equal(office.calls.find((c) => c.path === "/mcp")?.auth, "Bearer legacy-token", "the legacy record names the agent the poll runs as")
+  assert.equal(ws.recorded()[0].credentials, token)
+  assert.equal(existsSync(join(legacy, `${key}.json`)), false, "the legacy record is retired once copied")
+  assert.equal(existsSync(join(shared, `${key}.json`)), true, "the shared record is written")
+})
+
 test("not connected: a hint and a non-zero exit", async () => {
   const ws = workspace()
   const result = await ws.poll([], { AGENT_OFFICE_PI_CREDENTIALS: join(ws.dir, "missing.json") })
