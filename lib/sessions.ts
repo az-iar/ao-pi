@@ -15,7 +15,7 @@ import type { SessionInfo } from "@earendil-works/pi-coding-agent"
 
 export type SessionChoice =
   | { kind: "resume"; session: SessionInfo; via: "exact" | "prefix" | "substring" }
-  | { kind: "ambiguous"; matches: SessionInfo[]; query: string }
+  | { kind: "ambiguous"; matches: SessionInfo[]; query: string; total: number }
   | { kind: "none"; named: SessionInfo[]; query: string }
 
 const named = (infos: SessionInfo[]) => infos.filter((info) => (info.name ?? "").trim() !== "")
@@ -40,7 +40,7 @@ export function pickSession(infos: SessionInfo[], query: string): SessionChoice 
       // An exact name shared by several sessions is still a resume: the newest.
       return via === "exact"
         ? { kind: "resume", session: matches[0], via }
-        : { kind: "ambiguous", matches: matches.slice(0, 5), query }
+        : { kind: "ambiguous", matches: matches.slice(0, 5), query, total: matches.length }
     }
   }
   return { kind: "none", named: newestFirst(candidates).slice(0, 10), query }
@@ -56,7 +56,8 @@ export function message(choice: SessionChoice, current?: string): string {
       return `Continuing "${choice.session.name}" (${stamp(choice.session)}, ${choice.session.messageCount} messages).`
     case "ambiguous":
       return [
-        `"${choice.query}" names ${choice.matches.length}+ sessions; say which:`,
+        // The "+" only when the list was cut: "3+" for three sessions that all fit would be a lie.
+        `"${choice.query}" names ${choice.total}${choice.total > choice.matches.length ? "+" : ""} sessions; say which:`,
         ...choice.matches.map((info) => `  /office session "${info.name}"  (${label(info)})`),
       ].join("\n")
     case "none":

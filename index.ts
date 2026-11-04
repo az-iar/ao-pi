@@ -996,8 +996,12 @@ export default function agentOffice(pi: ExtensionAPI) {
       return
     }
     const choice: SessionChoice = pickSession(infos, query)
-    const text = sessionMessage(choice, ctx.sessionManager.getSessionFile())
-    if (choice.kind !== "resume") {
+    const current = ctx.sessionManager.getSessionFile()
+    const text = sessionMessage(choice, current)
+    // "Already in that session" is an answer, not a reason to switch to the file
+    // we are already reading: say so and stop, so the command cannot reload the
+    // session under the user for nothing.
+    if (choice.kind !== "resume" || (current && choice.session.path === current)) {
       ctx.ui.notify(text, "info")
       wake(text)
       return

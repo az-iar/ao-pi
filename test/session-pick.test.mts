@@ -64,6 +64,21 @@ test("an empty query lists what can be resumed, and a folder with none says how 
   assert.match(message(empty), /No named sessions in this folder yet/)
 })
 
+test("the ambiguous count only gains a + when the list was cut at five", () => {
+  const three = pickSession([info("bruno-a", "2026-11-01"), info("bruno-b", "2026-11-02"), info("bruno-c", "2026-11-03")], "bruno")
+  assert.equal(three.kind, "ambiguous")
+  assert.equal(three.kind === "ambiguous" && three.total, 3)
+  assert.match(message(three), /names 3 sessions/)
+  assert.doesNotMatch(message(three), /3\+ sessions/)
+
+  const many = Array.from({ length: 7 }, (_, i) => info(`bruno-${i}`, `2026-11-0${i + 1}`))
+  const cut = pickSession(many, "bruno")
+  assert.equal(cut.kind, "ambiguous")
+  assert.equal(cut.kind === "ambiguous" && cut.matches.length, 5)
+  assert.equal(cut.kind === "ambiguous" && cut.total, 7)
+  assert.match(message(cut), /names 7\+ sessions/)
+})
+
 test("resuming the session already open says so rather than switching", () => {
   const only = info("bruno", "2026-11-01")
   const choice = pickSession([only], "bruno")
