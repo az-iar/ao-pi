@@ -56,8 +56,11 @@ export function message(choice: SessionChoice, current?: string): string {
       return `Continuing "${choice.session.name}" (${stamp(choice.session)}, ${choice.session.messageCount} messages).`
     case "ambiguous":
       return [
-        // The "+" only when the list was cut: "3+" for three sessions that all fit would be a lie.
-        `"${choice.query}" names ${choice.total}${choice.total > choice.matches.length ? "+" : ""} sessions; say which:`,
+        // Say the real total, and say "showing N" when the list was cut: "7+"
+        // reads as "at least 7" either way, and the count is known exactly.
+        choice.total > choice.matches.length
+          ? `"${choice.query}" names ${choice.total} sessions (showing ${choice.matches.length}); say which:`
+          : `"${choice.query}" names ${choice.total} sessions; say which:`,
         ...choice.matches.map((info) => `  /office session "${info.name}"  (${label(info)})`),
       ].join("\n")
     case "none":

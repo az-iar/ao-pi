@@ -76,7 +76,8 @@ test("the ambiguous count only gains a + when the list was cut at five", () => {
   assert.equal(cut.kind, "ambiguous")
   assert.equal(cut.kind === "ambiguous" && cut.matches.length, 5)
   assert.equal(cut.kind === "ambiguous" && cut.total, 7)
-  assert.match(message(cut), /names 7\+ sessions/)
+  assert.match(message(cut), /names 7 sessions \(showing 5\)/)
+  assert.doesNotMatch(message(cut), /7\+/)
 })
 
 test("resuming the session already open says so rather than switching", () => {
