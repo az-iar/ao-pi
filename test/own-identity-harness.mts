@@ -4,6 +4,7 @@
 import { mkdirSync, mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { after } from "node:test"
 import { fakeOffice } from "./fake-office.mts"
 
 // Shared harness for the cases below: a fresh HOME, a fake office, an extension
@@ -14,6 +15,15 @@ export async function harness(env: Record<string, string | undefined>) {
   office.state.openTasks = []
   office.state.unclaimedTasks = []
   const url = await office.listen()
+  // The listener is this harness's own handle, so the harness closes it rather than
+  // leaving it to the caller's cleanup: `after()` registered while a test runs
+  // attaches to that test and runs whether it passes or fails, so a throw after
+  // harness() returns and before start() hands back a session still closes it. A
+  // caller's `finally` cannot cover that window - it has no session to shut down,
+  // and a throw in its own body skips the block entirely, which is how a failing
+  // file used to keep the fake office's listener open (ao-pi#45). Callers that
+  // close it themselves are unaffected: close() is safe to call twice.
+  after(() => office.close())
   const home = mkdtempSync(join(tmpdir(), "ao-own-identity-"))
   const repo = join(home, "repo")
   mkdirSync(repo)
