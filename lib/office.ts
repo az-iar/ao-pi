@@ -100,14 +100,39 @@ export function legacySessionPointerPath(sessionId: string): string {
   return join(credentialsDir(), "sessions", `${workspaceKey(sessionId)}.json`)
 }
 
+// ensurePrivateDir makes the record's directory private whether it is new or
+// older: mkdirSync's mode applies only to a directory it creates, so a sessions/
+// that already exists with a permissive umask stays readable by anyone who can
+// read its parent (bruno on ao-pi#39). What has to be closed is group and other
+// readability of the records, so those bits are what trigger the chmod: forcing
+// 0700 onto a directory that is already private at 0500 would also hand back the
+// owner's write bit, repairing a state directory that was deliberately made
+// read-only and defeating sessionAgentOf's EACCES path (ao-pi#40). A failure to
+// tighten is reported, not thrown - the save that follows is the operation that
+// matters, and a read-only state directory already has its own path.
+function ensurePrivateDir(dir: string) {
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  try {
+    if ((statSync(dir).mode & 0o077) !== 0) chmodSync(dir, 0o700)
+  } catch (err) {
+    console.warn(`[agent-office] could not tighten ${dir} to 0700: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
 // saveSessionAgent writes an approval into the shared directory atomically (temp
-// plus rename) with the runtime recorded, because three plugins can write it
-// concurrently and a half-written record reads as "no identity" (agent-office#560).
+// plus rename), because three plugins can write it concurrently and a half-written
+// record reads as "no identity" (agent-office#560). `runtime` is the one that last
+// wrote the record, not the one that first approved the session: a re-approval by
+// another plugin overwrites it, so it is an audit trail of the writer, not of the
+// approver (ao-pi#40).
+// `session` carries the id in full: the file is named sha256(id)[:16], which only
+// ever maps back to a session by rehashing a candidate, so the record has to name
+// its own session to be auditable on its own (ao-pi#40).
 export function saveSessionAgent(sessionId: string, slug: string) {
   const path = sessionPointerPath(sessionId)
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+  ensurePrivateDir(dirname(path))
   const tmp = `${path}.${process.pid}.tmp`
-  writeFileSync(tmp, JSON.stringify({ agent: slug, runtime: "pi", at: Date.now() }, null, 2) + "\n", { mode: 0o600 })
+  writeFileSync(tmp, JSON.stringify({ agent: slug, session: sessionId, runtime: "pi", at: Date.now() }, null, 2) + "\n", { mode: 0o600 })
   renameSync(tmp, path)
 }
 

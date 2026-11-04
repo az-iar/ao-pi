@@ -3,7 +3,7 @@
 // identity. HOME is its own: the directory is host-wide, and a shared HOME would
 // let these read what another test wrote.
 import assert from "node:assert/strict"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { test } from "node:test"
@@ -57,4 +57,28 @@ test("two sessions on one host read their own agent", () => {
   assert.equal(sessionAgentOf("session-one"), "pi")
   assert.equal(sessionAgentOf("session-two"), "other-agent")
   assert.equal(sessionAgentOf("session-three"), undefined)
+})
+
+// mkdirSync's mode applies only to a directory it creates, so an existing
+// sessions/ with looser bits stayed loose and the records were readable by anyone
+// who could read the parent (bruno on ao-pi#39, ao-pi#40).
+test("an existing sessions directory is tightened to 0700", () => {
+  const id = "session-loose-dir"
+  const dir = dirname(sessionPointerPath(id))
+  mkdirSync(dir, { recursive: true })
+  chmodSync(dir, 0o755)
+  assert.equal(statSync(dir).mode & 0o777, 0o755, "fixture: the directory starts loose")
+  saveSessionAgent(id, "pi")
+  assert.equal(statSync(dir).mode & 0o777, 0o700, "the record's directory is private after a save")
+  assert.equal(statSync(sessionPointerPath(id)).mode & 0o777 & 0o077, 0, "and the record itself is not group- or world-readable")
+})
+
+// `runtime` records the writer, not the approver: a re-approval by another plugin
+// overwrites it, and the field says so rather than implying it names the approver.
+test("runtime names the last writer, so a re-approval overwrites it", () => {
+  const id = "session-rewritten"
+  saveSessionAgent(id, "pi")
+  writeFileSync(sessionPointerPath(id), JSON.stringify({ agent: "pi", runtime: "claude", at: Date.now() }), { mode: 0o600 })
+  assert.equal(sessionAgentOf(id), "pi", "the identity is unaffected by who wrote the record")
+  assert.equal(JSON.parse(readFileSync(sessionPointerPath(id), "utf8")).runtime, "claude")
 })
