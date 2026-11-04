@@ -453,6 +453,7 @@ export function supervisorPrompt(id: string, task: any, worktree: string, branch
     `3. Commit on this branch, push with \`git push -u origin ${branch}\`, and open the pull request with \`gh pr create\`; its body links the Office task ${OFFICE}/tasks/${id}.`,
     `4. Send the PR link to the reviewers team with post_message to reviewers and task_id ${id}, and post it on the task with post_comment. Leave the task in_progress for review. If you cannot finish, set it blocked with update_task and a comment saying why.`,
     `5. Finish by reading today's journal with journal_read, adding this task's done, blocked and next items to it, each linking {type: "task", ref: "${id}"}, and writing back the full lists with journal_write, since it replaces the day. Record any choice that outlives the task with decision_write, linking the task the same way.`,
+    `Before you write anything, check you are in that worktree: \`pwd\` must be inside ${worktree}, and \`git rev-parse --show-toplevel\` must print it. If either says otherwise — another repository's worktree, another agent's tree, or a plain directory — stop, do not write, and post_comment on the task naming where you actually are and what the path should have been (agent-office#540: a worker wrote into another repository's worktree because nothing told it to refuse).`,
     "Nobody merges: never merge, never push to main or any branch but yours, never force-push. Do not dispatch other Office tasks.",
     SAFETY_RULES,
   ].join("\n")

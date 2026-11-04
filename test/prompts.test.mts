@@ -85,3 +85,12 @@ test("the cron line carries the workspace, PATH and the right runtime", () => {
   assert.match(cronLine("/w", "/home/a/.cache/pi/node_modules/ao-pi/poll.ts", "/usr/bin"), / bun '/)
 })
 
+
+// agent-office#540: a worker wrote into another repository's worktree because
+// nothing told it to refuse. The brief now says what to check and what to do.
+test("the worker is told to refuse when it is not in its own worktree", () => {
+  assert.match(worker, /pwd` must be inside \/work\/repo-office-abc/)
+  assert.match(worker, /git rev-parse --show-toplevel/)
+  assert.match(worker, /another repository's worktree, another agent's tree, or a plain directory/)
+  assert.match(worker, /stop, do not write, and post_comment on the task naming where you actually are/)
+})
