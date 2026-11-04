@@ -670,10 +670,41 @@ export type RepoChoice = { path: string } | { error: string }
 // session's checkout. It refuses rather than guesses: no match, or more than one,
 // is an error naming what it found.
 export function chooseRepo(wanted: string, candidates: { path: string; remote?: string }[]): RepoChoice {
-  const matches = candidates.filter((candidate) => candidate.remote && repoFromRemote(candidate.remote) === wanted)
+  // Accept `owner/name` or a remote URL, compared the way repoFromRemote reads it.
+  const normalised = repoFromRemote(wanted) ?? wanted.trim().toLowerCase()
+  const matches = candidates.filter((candidate) => candidate.remote && repoFromRemote(candidate.remote) === normalised)
   if (matches.length === 1) return { path: matches[0].path }
   if (matches.length === 0) {
-    return { error: `no local checkout of ${wanted} beside this one; add it to the workspace or clear the task's repo` }
+    return { error: `no local checkout of ${normalised} beside this one; add it to the workspace or clear the task's repo` }
   }
-  return { error: `${matches.length} checkouts of ${wanted} beside this one (${matches.map((m) => m.path).join(", ")}); refusing to guess which one` }
+  return { error: `${matches.length} checkouts of ${normalised} beside this one (${matches.map((m) => m.path).join(", ")}); refusing to guess which one` }
+}
+
+// dedupeCandidates keeps one checkout per repository: a linked worktree shares
+// its origin and its git common dir with the main checkout, so a sibling scan
+// sees the same repository several times and "two checkouts" would refuse every
+// dispatch once any task worktree exists (neo, ao-pi#17 review).
+export function dedupeCandidates<T extends { path: string; remote?: string; commonDir?: string }>(candidates: T[]): T[] {
+  const seen = new Map<string, T>()
+  for (const candidate of candidates) {
+    const key = candidate.commonDir ?? candidate.path
+    const held = seen.get(key)
+    // Prefer the main checkout: a worktree's path sits under the repository's
+    // directory but is not where a new worktree should be rooted.
+    if (!held || held.path.length > candidate.path.length) seen.set(key, candidate)
+  }
+  return [...seen.values()]
+}
+
+// resolveDispatchRepo answers which checkout a dispatch for this task should use.
+// Empty taskRepo keeps the old behaviour (the session's repo); a named repo is
+// matched by remote and refused when there is no checkout or more than one.
+export function resolveDispatchRepo(
+  sessionRepo: string,
+  taskRepo: string,
+  list: (dir: string) => { path: string; remote?: string; commonDir?: string }[],
+): RepoChoice {
+  const wanted = taskRepo.trim().toLowerCase()
+  if (!wanted) return { path: sessionRepo }
+  return chooseRepo(wanted, dedupeCandidates(list(sessionRepo)))
 }
