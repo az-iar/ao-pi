@@ -490,13 +490,32 @@ export function onTaskBranch(directory: string) {
 
 export const taskShort = (id: string) => createHash("sha256").update(id).digest("hex").slice(0, 8)
 
+// worktreeSlug is the owner's part of a worktree name: lowercase, no path
+// separators or spaces, short enough to stay readable in a path.
+export const worktreeSlug = (owner: string) =>
+  owner
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24) || "agent"
+
 // Session and cron dispatch give each task a worktree beside the repo,
-// `<repo>-office-<short>` on branch `office/<short>`; a retry reuses it.
-// It branches from the remote's default branch when the clone knows one.
-export function addWorktree(repo: string, id: string): Promise<{ path: string; branch: string }> {
+// `<repo>-office-<owner>-<short>` on branch `office/<owner>-<short>`; a retry
+// reuses it. It branches from the remote's default branch when the clone knows
+// one.
+//
+// The owner is part of the name, not just the task id, because two agents can
+// be handed the same task: without it both compute the same path and the same
+// branch, the reuse guard below accepts the first agent's worktree, and the
+// second worker writes into a tree someone else owns (agent-office#540). An
+// owner-less call keeps the old shape, so an existing worktree from an earlier
+// version is still found and resumed rather than duplicated.
+export function addWorktree(repo: string, id: string, owner?: string): Promise<{ path: string; branch: string }> {
   const short = taskShort(id)
-  const branch = `office/${short}`
-  const path = join(dirname(repo), `${basename(repo)}-office-${short}`)
+  const tag = owner?.trim() ? `${worktreeSlug(owner)}-${short}` : short
+  const branch = `office/${tag}`
+  const path = join(dirname(repo), `${basename(repo)}-office-${tag}`)
   if (existsSync(path)) {
     const current = spawnSync("git", ["-C", path, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" })
     if (current.status === 0 && current.stdout.trim() === branch) return Promise.resolve({ path, branch })

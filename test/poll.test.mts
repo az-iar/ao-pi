@@ -163,13 +163,13 @@ test("a new todo task is claimed, run as a worker in its worktree, and its dispa
   assert.equal(ws.recorded().length, 2)
   const run = ws.recorded()[1]
   const short = createHash("sha256").update("task-new").digest("hex").slice(0, 8)
-  const worktree = `${ws.dir}-office-${short}`
-  assert.equal(execFileSync("git", ["-C", worktree, "branch", "--show-current"], { encoding: "utf8" }).trim(), `office/${short}`)
+  const worktree = `${ws.dir}-office-pi-${short}`
+  assert.equal(execFileSync("git", ["-C", worktree, "branch", "--show-current"], { encoding: "utf8" }).trim(), `office/pi-${short}`)
   assert.equal(run.cwd, worktree)
   assert.deepEqual(run.argv.slice(0, 3), ["-e", extensionDir, "--print"])
   assert.equal(run.child, "1")
   assert.match(run.argv[3], /^Agent Office task task-new\./)
-  assert.ok(run.argv[3].includes(`git worktree ${worktree} on branch office/${short}`))
+  assert.ok(run.argv[3].includes(`git worktree ${worktree} on branch office/pi-${short}`))
   assert.match(run.argv[3], /Before you start any work, post one short comment on the task with post_comment/)
   const update = office.calls.find((c) => c.body?.params?.name === "update_task")
   assert.equal(update?.body.params.arguments.task_id, "task-new")
@@ -184,7 +184,7 @@ test("a failed dispatch stays unseen and retries after the obstruction is gone",
   office.calls.length = 0
   office.state.openTasks = [...office.state.openTasks, { id: "task-retry", title: "Retry me", status: "todo" }]
   const short = createHash("sha256").update("task-retry").digest("hex").slice(0, 8)
-  const worktree = `${ws.dir}-office-${short}`
+  const worktree = `${ws.dir}-office-pi-${short}`
   mkdirSync(worktree)
   const failed = await ws.poll()
   assert.equal(failed.code, 0, failed.stderr)
