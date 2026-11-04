@@ -703,7 +703,7 @@ export default function agentOffice(pi: ExtensionAPI) {
       const detail = await call("get_task", { task_id: id }).catch(() => undefined)
       const task = (detail as any)?.task ?? detail
       await claimTask(call, id)
-      const { path, branch } = await addWorktree(repo, id)
+      const { path, branch } = await addWorktree(repo, id, ownAgent?.slug)
       notice(`Agent Office: dispatching task ${id} to a worker in ${path} (${branch}).`)
       const prompt = supervisorPrompt(id, task, path, branch)
       const result = await run(PI_BIN, ["-e", HERE, "--print", prompt], path, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile }).catch((err) => {

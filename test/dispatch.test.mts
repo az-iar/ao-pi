@@ -71,3 +71,35 @@ test("a task that stopped being todo is not dispatched", async () => {
     assert.equal(verdict.reason, status.toLowerCase())
   }
 })
+
+// agent-office#540: two agents can be handed the same task. Without the owner
+// in the name they compute the same worktree path and branch, and the second
+// one resumes the first one's tree.
+test("two agents given the same task get different worktrees", async () => {
+  const { mkdtempSync } = await import("node:fs")
+  const { tmpdir } = await import("node:os")
+  const { join } = await import("node:path")
+  const { addWorktree, worktreeSlug } = await import("../lib/office.ts")
+  const repo = join(mkdtempSync(join(tmpdir(), "ao-wt-")), "ao-pi")
+  const { spawnSync } = await import("node:child_process")
+  spawnSync("git", ["init", "-q", "-b", "main", repo])
+  // A branch to hang a worktree off: git will not add one to an empty repo.
+  spawnSync("git", ["-C", repo, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"])
+
+  const a = await addWorktree(repo, "94b93cab", "ageo")
+  const b = await addWorktree(repo, "94b93cab", "vinn")
+  assert.notEqual(a.path, b.path, "different owners, different paths")
+  assert.notEqual(a.branch, b.branch, "different owners, different branches")
+  assert.match(a.branch, /^office\/ageo-/)
+  assert.match(b.branch, /^office\/vinn-/)
+
+  // The same owner retrying resumes its own worktree rather than making another.
+  const again = await addWorktree(repo, "94b93cab", "vinn")
+  assert.equal(again.path, b.path)
+
+  // An owner-less call keeps the old shape, so an existing tree from an earlier
+  // version is still found instead of duplicated.
+  const legacy = await addWorktree(repo, "94b93cab")
+  assert.doesNotMatch(legacy.branch, /^office\/(ageo|vinn)-/)
+  assert.equal(worktreeSlug("  Vinn / Office  "), "vinn-office")
+})

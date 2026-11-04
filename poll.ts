@@ -243,7 +243,7 @@ async function main(): Promise<number> {
           continue
         }
         await claimTask(call, id)
-        const { path, branch } = await addWorktree(canonicalRoot(directory), id)
+        const { path, branch } = await addWorktree(canonicalRoot(directory), id, me.agent?.slug)
         log(`dispatching task ${id} to ${path}`)
         let job: ReturnType<typeof runPi>
         try {
