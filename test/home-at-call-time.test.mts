@@ -1,7 +1,8 @@
-// The state directory must be resolved when it is used, not when the module loads.
-// Several harnesses run in one process and each sets $HOME before importing, so a
-// cached directory makes every one of them read the first harness's records - the
-// HOME trap that made ao-opencode#35 red only in the full suite (agent-office#560).
+// The state directory must be resolved when it is used, not when the module loads:
+// a harness sets $HOME before importing, so anything that stands up more than one
+// harness in a process would otherwise have them all read the first one's records.
+// The current suites run one harness per file, so this is preventive - the test
+// pins the property rather than a failure anyone has seen.
 import assert from "node:assert/strict"
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"

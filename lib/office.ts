@@ -14,10 +14,10 @@ import { basename, dirname, join, sep } from "node:path"
 
 export const OFFICE = (process.env.AGENT_OFFICE_URL?.trim() || "https://office.byma.tech").replace(/\/+$/, "")
 export const CREDENTIALS_OVERRIDE = process.env.AGENT_OFFICE_PI_CREDENTIALS
-// Resolved at call time, never cached at import: several harnesses run in one
-// process and each sets $HOME before importing, so a cached directory makes them
-// all read the first harness's records. That is the HOME trap behind #35's
-// full-suite-only red (agent-office#560).
+// Resolved at call time, never cached at import: a harness sets $HOME before
+// importing, and anything that stands up more than one harness in a process would
+// otherwise have them all read the first one's records. Preventive: the current
+// suites run one harness per file, so no test depends on this today.
 function credentialsDir(): string {
   return join(homedir(), ".config", "agent-office", "pi")
 }
