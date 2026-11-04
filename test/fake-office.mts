@@ -4,8 +4,14 @@ import { createServer, type Server } from "node:http"
 
 export type Call = { method: string; path: string; auth?: string; headers?: Record<string, string | undefined>; body: any }
 
+// A request a test is waiting for: `seen` settles it from inside the request
+// handler, so the wait completes when the request actually arrives rather than
+// when the code that sent it claims it did (ao-pi#41).
+type Waiter = { match: (call: Call) => boolean; seen: (call: Call) => void; fail: (err: Error) => void }
+
 export function fakeOffice() {
   const calls: Call[] = []
+  const waiters: Waiter[] = []
   const state = {
     workStatus: "working",
     // The agent this Office answers checkins as; tests set it to the agent they
@@ -44,6 +50,11 @@ export function fakeOffice() {
       headers: req.headers as Record<string, string | undefined>,
       body,
     })
+    for (const waiter of [...waiters]) {
+      if (!waiter.match(calls[calls.length - 1])) continue
+      waiters.splice(waiters.indexOf(waiter), 1)
+      waiter.seen(calls[calls.length - 1])
+    }
 
     if (url.pathname === "/oauth/register") return json(201, { client_id: "client-1", redirect_uris: body.redirect_uris })
     if (url.pathname === "/oauth/authorize") {
@@ -97,7 +108,40 @@ export function fakeOffice() {
     calls,
     state,
     listen: () => new Promise<string>((r) => server.listen(0, "127.0.0.1", () => r(`http://127.0.0.1:${(server.address() as { port: number }).port}`))),
-    close: () => new Promise<void>((r) => (server.closeAllConnections(), server.close(() => r()))),
+    // Resolves with the first request that matches, including one already served,
+    // and rejects with `message` when none arrives: a regression has to fail the
+    // test in seconds rather than leave it pending. The timeout is a failure guard,
+    // not the wait - the wait itself is the request.
+    waitForCall: (match: (call: Call) => boolean, message: string, timeoutMs = 5_000) =>
+      new Promise<Call>((resolve, reject) => {
+        const served = calls.find(match)
+        if (served) return resolve(served)
+        let timer: ReturnType<typeof setTimeout>
+        const waiter: Waiter = {
+          match,
+          seen: (call) => {
+            clearTimeout(timer)
+            resolve(call)
+          },
+          fail: (err) => {
+            clearTimeout(timer)
+            reject(err)
+          },
+        }
+        timer = setTimeout(() => {
+          waiters.splice(waiters.indexOf(waiter), 1)
+          waiter.fail(new Error(message))
+        }, timeoutMs)
+        waiters.push(waiter)
+      }),
+    close: () =>
+      new Promise<void>((r) => {
+        // Nothing can arrive once the server is closing, so nobody may be left
+        // waiting on it.
+        for (const waiter of waiters.splice(0)) waiter.fail(new Error("the fake office closed before the expected request arrived"))
+        server.closeAllConnections()
+        server.close(() => r())
+      }),
   }
 }
 
