@@ -75,8 +75,11 @@ import {
 } from "./lib/office.ts"
 
 const configuredCallbackPort = Number(process.env.AGENT_OFFICE_CALLBACK_PORT ?? 41997)
+// 0 means "let the OS pick": every approval then gets its own ephemeral port,
+// which is what a test suite running files in parallel needs — a fixed base
+// port made two suites collide and fall back to the next one.
 const CALLBACK_BASE_PORT =
-  Number.isInteger(configuredCallbackPort) && configuredCallbackPort >= 1 && configuredCallbackPort <= 65535 ? configuredCallbackPort : 41997
+  Number.isInteger(configuredCallbackPort) && configuredCallbackPort >= 0 && configuredCallbackPort <= 65535 ? configuredCallbackPort : 41997
 const CALLBACK_TRIES = 20
 const HERE = dirname(fileURLToPath(import.meta.url))
 const TOKEN_SCRIPT = join(HERE, "lib", "token.mts")
@@ -207,8 +210,11 @@ function listenForCode(state: string): Promise<{ port: number; code: Promise<str
       })
       let settled = false
       let timer: ReturnType<typeof setTimeout> | undefined
+      // The bound port, which differs from the requested one when 0 was asked
+      // for: the callback URL must name the port that is really listening.
+      let bound = port
       const server = createServer((req, res) => {
-        const result = completeCallback(`http://127.0.0.1:${port}${req.url ?? "/"}`)
+        const result = completeCallback(`http://127.0.0.1:${bound}${req.url ?? "/"}`)
         if (!result.handled) {
           res.writeHead(404).end()
           return
@@ -233,6 +239,7 @@ function listenForCode(state: string): Promise<{ port: number; code: Promise<str
       })
       server.listen(port, "127.0.0.1", () => {
         if (settled) return
+        bound = (server.address() as { port: number }).port
         timer = setTimeout(() => cancel(new Error("timed out waiting for the approval in the browser")), APPROVAL_TIMEOUT_MS)
         pendingCallbacks.set(state, {
           resolve: resolveCode,
@@ -244,7 +251,7 @@ function listenForCode(state: string): Promise<{ port: number; code: Promise<str
           },
           cancel,
         })
-        resolve({ port, code, close: () => cancel(new Error("approval cancelled")) })
+        resolve({ port: bound, code, close: () => cancel(new Error("approval cancelled")) })
       })
     }
     attempt(0)

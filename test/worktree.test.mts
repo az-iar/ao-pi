@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { execFileSync, spawn, spawnSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -243,7 +243,7 @@ test("/office in a worktree connects that worktree alone", async (t) => {
   const approval = await worktreeSession.tools.get("office_connect").execute("call", { agent_name: "agent-b" })
   const link = approval.content[0].text.match(/https?:\/\/\S+/)?.[0]
   assert.ok(link, "the approval link is returned")
-  await fetch(link, { redirect: "follow" })
+  const response = await fetch(link, { redirect: "follow" })
   // Wait for the thing this test is about, not for a process-global signal.
   // `mcp.has("office")` can already be true from an earlier session in this
   // same process, so it returned immediately and the assertions below ran
@@ -252,7 +252,23 @@ test("/office in a worktree connects that worktree alone", async (t) => {
   await waitFor(() => lib.loadMarkedAgentPointer(lib.agentPointerPath(worktree)) === "agent-b")
 
   // The approval writes the worktree's own pointer, marked as written here.
-  assert.equal(lib.isUnconnectedWorktree(worktree), false)
+  // The state rides on the assertion message, so a red run names its mechanism
+  // and a green one prints nothing.
+  const pointerFile = lib.agentPointerPath(worktree)
+  const state = JSON.stringify({
+    worktree,
+    main,
+    pointerFile,
+    pointerExists: existsSync(pointerFile),
+    pointerContents: existsSync(pointerFile) ? readFileSync(pointerFile, "utf8").trim() : null,
+    loadAgentPointer: lib.loadAgentPointer(pointerFile),
+    loadMarkedAgentPointer: lib.loadMarkedAgentPointer(pointerFile),
+    isUnconnected: lib.isUnconnectedWorktree(worktree),
+    mcpRegistered: worktreeSession.mcp.has("office"),
+    fetchStatus: response.status,
+    callbackPort: process.env.AGENT_OFFICE_CALLBACK_PORT ?? "(default)",
+  })
+  assert.equal(lib.isUnconnectedWorktree(worktree), false, state)
   assert.equal(lib.loadMarkedAgentPointer(lib.agentPointerPath(worktree)), "agent-b")
   assert.equal(lib.loadAgentPointer(lib.agentPointerPath(main)), "agent-a", "the worktree did not move the main checkout")
   assert.equal(lib.resolveCredentials(worktree, main).credentialsFile, lib.agentCredentialsPath("agent-b"))
