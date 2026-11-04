@@ -473,6 +473,46 @@ export function stillDispatchable(task: any): { ok: boolean; reason?: string } {
   return status === "todo" ? { ok: true } : { ok: false, reason: status }
 }
 
+// One worker per unit of work, not per task copy (ao-pi#4). The dispatch lock is
+// keyed on the task id, which is right for "this task is being worked" and wrong
+// for four copies of one issue: each id got its own worker. The scope key is the
+// task's title and repo normalised, so the copies collapse onto one key while two
+// genuinely different tasks keep their own.
+export function workScopeKey(task: any): string | undefined {
+  const title = String(task?.title ?? "").trim().toLowerCase().replace(/\s+/g, " ")
+  if (!title) return undefined
+  const repo = String(task?.repo ?? "").trim().toLowerCase()
+  return createHash("sha256").update(repo + "\n" + title).digest("hex").slice(0, 16)
+}
+
+// Scope locks live in a subdirectory of the dispatch directory: acquireDispatch
+// counts *.lock files in the directory itself against MAX_DISPATCHES, and a scope
+// is a duplicate guard rather than a slot.
+const scopeDir = (dir: string) => join(dir, "work")
+
+// acquireWorkScope is false when another worker already holds this scope; a lock
+// older than DISPATCH_STALE_MS is reclaimed, as the dispatch lock is.
+export function acquireWorkScope(dir: string, key: string): boolean {
+  const path = join(scopeDir(dir), `${key}.lock`)
+  try {
+    mkdirSync(scopeDir(dir), { recursive: true, mode: 0o700 })
+    if (Date.now() - statSync(path).mtimeMs <= DISPATCH_STALE_MS) return false
+    unlinkSync(path)
+  } catch {}
+  try {
+    writeFileSync(path, JSON.stringify({ scope: key, pid: process.pid, created: Date.now() }) + "\n", { flag: "wx", mode: 0o600 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function releaseWorkScope(dir: string, key: string) {
+  try {
+    unlinkSync(join(scopeDir(dir), `${key}.lock`))
+  } catch {}
+}
+
 export async function claimTask(call: (name: string, args?: Record<string, unknown>) => Promise<unknown>, id: string) {
   for (const method of ["ack_task", "accept_task"]) {
     try {
@@ -480,6 +520,19 @@ export async function claimTask(call: (name: string, args?: Record<string, unkno
     } catch {}
   }
   await call("update_task", { task_id: id, status: "in_progress", comment: "Pi dispatched this task to a worker session." })
+}
+
+// unclaimTask puts a task back to todo when a dispatch gives up after claiming it
+// (rodri on ao-pi#4). Every refusal after the claim - a repo that does not resolve,
+// a worktree that is not its own root, a sandbox that cannot start, a worker that
+// never launched - used to leave the task `in_progress` with nobody on it, and
+// stillDispatchable then refused every retry: the same stranding as a cancelled
+// task flipped back, from the other direction. Best effort: the dispatch's own
+// error is what the caller needs to see.
+export async function unclaimTask(call: (name: string, args?: Record<string, unknown>) => Promise<unknown>, id: string, why: string) {
+  try {
+    await call("update_task", { task_id: id, status: "todo", comment: `Dispatch gave up before starting a worker: ${why}` })
+  } catch {}
 }
 
 // A task worktree's own Pi belongs to its dispatched worker: it must not poll
@@ -746,6 +799,10 @@ export type SandboxPaths = {
   gitDir: string
   // Pi's own state, which it writes on every turn.
   piState: string
+  // The directory holding the Office agent's credentials file: a worker refreshes
+  // its token mid-run and writes the file beside itself, so the directory (not the
+  // file) is what has to be writable - the write is a temp file plus a rename.
+  credentials?: string
   // Caches that must stay warm, or every dispatch re-downloads.
   caches: string[]
 }
@@ -764,6 +821,10 @@ export function sandboxArgs(paths: SandboxPaths): string[] {
   bindIfPresent("--ro-bind", join(paths.gitDir, "config"))
   bindIfPresent("--ro-bind", join(paths.gitDir, "hooks"))
   bindIfPresent("--bind", paths.piState)
+  // A worker's token refresh has to be able to save (bruno on ao-pi#4, rodri's
+  // must-fix): without this a sandboxed worker reads the credentials and cannot
+  // write the refreshed ones back.
+  if (paths.credentials) bindIfPresent("--bind", paths.credentials)
   for (const cache of paths.caches) bindIfPresent("--bind", cache)
   return args
 }
@@ -781,6 +842,19 @@ export function sandboxedWorker(bin: string, argv: string[], paths: SandboxPaths
   return [bin, ...sandboxArgs(paths), ...argv]
 }
 
+// sandboxDecision is whether a worker runs sandboxed, and whether that is a
+// requirement (ao-pi#4). The observed write into another task's worktree was an
+// instruction-only defence: the worker was told not to write outside its tree and
+// nothing enforced it. So the sandbox is on by default where it can run, `=0`
+// opts out deliberately, and `=1` means "required": a host without bwrap refuses
+// the dispatch rather than quietly running the worker uncontained.
+export function sandboxDecision(setting: string | undefined, available: boolean): { on: boolean; required: boolean } {
+  const value = String(setting ?? "").trim().toLowerCase()
+  if (["0", "off", "false", "no"].includes(value)) return { on: false, required: false }
+  const required = ["1", "on", "true", "yes"].includes(value)
+  return { on: available, required }
+}
+
 // sandboxAvailable answers whether the sandbox can run at all: bwrap present and
 // unprivileged user namespaces permitted.
 export function sandboxAvailable(): boolean {
@@ -793,11 +867,12 @@ export const SANDBOX_BIN = "bwrap"
 // gitCommonDir answers an ABSOLUTE path, so it must not be joined onto the worktree:
 // path.join does not reset on an absolute segment, and the missing bind source makes
 // bwrap refuse to start - every dispatch fails with the flag on (neo, ao-pi#22).
-export function workerSandboxPaths(worktree: string): SandboxPaths {
+export function workerSandboxPaths(worktree: string, credentialsFile?: string): SandboxPaths {
   return {
     worktree,
     gitDir: gitCommonDir(worktree) ?? join(worktree, ".git"),
     piState: join(homedir(), ".config", "pig", "agent"),
+    credentials: credentialsFile ? dirname(credentialsFile) : undefined,
     caches: [join(homedir(), ".npm"), join(homedir(), ".cache", "go-build"), join(homedir(), "go", "pkg", "mod")],
   }
 }

@@ -65,6 +65,7 @@ import {
   onTaskBranch,
   REFRESH_EARLY_MS,
   releaseDispatch,
+  releaseWorkScope,
   releaseNotice,
   resolveCredentials,
   saveAgentPointers,
@@ -77,12 +78,18 @@ import {
   workspaceKey,
   resolveDispatchRepo,
   siblingCheckouts,
+  sandboxDecision,
   sandboxedWorker,
+  sandboxAvailable,
   SANDBOX_BIN,
   workerSandboxPaths,
   dispatchTarget,
   scratchTaskDir,
   scratchPrompt,
+  stillDispatchable,
+  unclaimTask,
+  workScopeKey,
+  acquireWorkScope,
 } from "./lib/office.ts"
 
 const configuredCallbackPort = Number(process.env.AGENT_OFFICE_CALLBACK_PORT ?? 41997)
@@ -722,9 +729,46 @@ export default function agentOffice(pi: ExtensionAPI) {
   const dispatchTask = async (id: string) => {
     const assignedKey = assignedKeys.get(id)
     let workerStarted = false
+    // Held until this dispatch ends: one worker per unit of work (ao-pi#4).
+    let heldScope: string | undefined
+    // Whether the task was claimed (flipped to in_progress): an abort after that
+    // has to put it back to todo, or the task is stranded and unretryable.
+    let claimed = false
     try {
       const detail = await call("get_task", { task_id: id }).catch(() => undefined)
       const task = (detail as any)?.task ?? detail
+      // The poller handed us a snapshot (ao-pi#4): between reading it and taking a
+      // slot the task can be cancelled, done or claimed. stillDispatchable has
+      // said so since agent-office#540 and nothing called it, so a cancelled task
+      // was claimed here and flipped back to in_progress by the claim below.
+      const verdict = stillDispatchable(task)
+      if (!verdict.ok) {
+        notice(`Agent Office: not dispatching task ${id}: it is ${verdict.reason}, not todo.`)
+        if (assignedKey) seenAssigned.delete(assignedKey)
+        return
+      }
+      // The worker's shell gets only its worktree and the git data a commit
+      // writes, writable (agent-office#551). Default on where bwrap can run, `=0`
+      // opts out, `=1` requires it. Decided HERE, before the claim and before any
+      // git work: a refusal has to leave the task todo and no worktree behind
+      // (rodri on ao-pi#4).
+      const sandbox = sandboxDecision(process.env.AGENT_OFFICE_SANDBOX, sandboxAvailable())
+      if (sandbox.required && !sandbox.on) {
+        notice(`Agent Office: not dispatching task ${id}: AGENT_OFFICE_SANDBOX requires bwrap, which is unavailable here`, "error")
+        if (assignedKey) seenAssigned.delete(assignedKey)
+        return
+      }
+      const sandboxOn = sandbox.on
+      // Four copies of one issue are four ids and used to be four workers. The
+      // scope is the title and repo, so the copies collapse to one worker.
+      const scope = workScopeKey(task)
+      if (scope && !acquireWorkScope(dispatchDir(), scope)) {
+        notice(`Agent Office: not dispatching task ${id}: another copy of "${String((task as any)?.title ?? "").slice(0, 60)}" is already running.`)
+        if (assignedKey) seenAssigned.delete(assignedKey)
+        return
+      }
+      heldScope = scope
+      claimed = true
       await claimTask(call, id)
       // A repo-less task gets NO worktree and no repo cwd: Azri's decision on card
       // 53828e66. Defaulting it to this session's repo is what put a worker in a
@@ -766,12 +810,9 @@ export default function agentOffice(pi: ExtensionAPI) {
       }
       notice(`Agent Office: dispatching task ${id} to a worker in ${path} (${branch}).`)
       const prompt = supervisorPrompt(id, task, path, branch)
-      // AGENT_OFFICE_SANDBOX=1 runs the worker's shell with only its worktree and
-      // the git data a commit writes writable (agent-office#551).
-      const sandboxOn = process.env.AGENT_OFFICE_SANDBOX === "1"
       let workerArgs: string[] | undefined
       try {
-        workerArgs = sandboxedWorker(SANDBOX_BIN, [PI_BIN, "-e", HERE, "--print", prompt], workerSandboxPaths(path), sandboxOn)
+        workerArgs = sandboxedWorker(SANDBOX_BIN, [PI_BIN, "-e", HERE, "--print", prompt], workerSandboxPaths(path, credentialsFile), sandboxOn)
       } catch (err) {
         // Refuse the dispatch rather than run the worker unsandboxed.
         notice(`Agent Office: not dispatching task ${id}: ${String(err instanceof Error ? err.message : err)}`, "error")
@@ -796,6 +837,11 @@ export default function agentOffice(pi: ExtensionAPI) {
       warn("could not dispatch Office task", { task: id, error: String(err) })
       notice(`Agent Office: could not dispatch task ${id}: ${String(err)}`, "error")
     } finally {
+      // A dispatch that claimed the task and did not start a worker hands the task
+      // back: otherwise it sits in_progress with nobody on it and stillDispatchable
+      // refuses every retry (rodri on ao-pi#4).
+      if (claimed && !workerStarted) await unclaimTask(call, id, "no worker started")
+      if (heldScope) releaseWorkScope(dispatchDir(), heldScope)
       releaseDispatch(dispatchDir(), id)
       dispatching.delete(id)
       assignedKeys.delete(id)
