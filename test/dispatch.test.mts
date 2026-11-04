@@ -71,3 +71,18 @@ test("a task that stopped being todo is not dispatched", async () => {
     assert.equal(verdict.reason, status.toLowerCase())
   }
 })
+
+// agent-office#540: a task from another project would be worked in a worktree of
+// this repository. The payload names a project, not a repository, so the check
+// is a comparison against the repo's own name — and an unnamed project is not a
+// mismatch, or every task without one would stop dispatching.
+test("a task naming another project is not dispatched here", async () => {
+  const { projectMismatch } = await import("../lib/office.ts")
+  const repo = "/home/azri/projects/personal/ao-pi"
+  assert.equal(projectMismatch({ project: "ao-pi" }, repo), undefined, "the same project dispatches")
+  assert.equal(projectMismatch({ project: "AO-PI" }, repo), undefined, "case is not a mismatch")
+  assert.equal(projectMismatch({ project_slug: "ao-pi" }, repo), undefined, "the older field name works")
+  assert.equal(projectMismatch({}, repo), undefined, "an unnamed project is not a mismatch")
+  assert.equal(projectMismatch({ project: "" }, repo), undefined)
+  assert.match(String(projectMismatch({ project: "agent-office" }, repo)), /agent-office.*ao-pi/)
+})

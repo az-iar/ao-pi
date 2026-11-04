@@ -458,6 +458,24 @@ export function supervisorPrompt(id: string, task: any, worktree: string, branch
   ].join("\n")
 }
 
+// projectMismatch reports when a task names a project that is not the
+// repository this poller is in. The task payload carries a project slug, not a
+// repository path (taskData below reads task.project or task.project_slug), so
+// this is the strongest check the payload allows: a named project that differs
+// from the repo's own name means the poller is about to hand a worker a task
+// from somewhere else, in a worktree of its own repo (agent-office#540).
+//
+// An unnamed project is not a mismatch: plenty of tasks have none, and refusing
+// those would stop dispatch for everyone to catch a case they do not have.
+export function projectMismatch(task: any, repo: string): string | undefined {
+  const project = String(task?.project ?? task?.project_slug ?? "").trim()
+  if (!project) return undefined
+  const name = basename(repo).toLowerCase()
+  const wanted = project.toLowerCase()
+  if (wanted === name) return undefined
+  return `task names project ${project}, this poller is in ${basename(repo)}`
+}
+
 // stillDispatchable is the check between the poller's snapshot and the claim.
 // The snapshot can be minutes old: a task that was todo when the poller read
 // the list may be cancelled, done or blocked by the time a dispatch slot frees

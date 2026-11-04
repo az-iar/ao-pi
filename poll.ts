@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url"
 import {
   acquireDispatch,
   addWorktree,
+  projectMismatch,
   stillDispatchable,
   agentCredentialsPath,
   agentStateDir,
@@ -236,6 +237,15 @@ async function main(): Promise<number> {
         // a worker for work nobody wants.
         const current = (detail as any)?.task ?? detail
         const dispatchable = stillDispatchable(current)
+        // A task from another project would be worked in a worktree of this
+        // repository: refuse rather than write into the wrong one.
+        const mismatch = projectMismatch(current, canonicalRoot(directory))
+        if (mismatch) {
+          failed.add(key)
+          releaseDispatch(dispatchDir, id)
+          log(`task ${id} is not for this repository: ${mismatch}`)
+          continue
+        }
         if (!dispatchable.ok) {
           failed.add(key)
           releaseDispatch(dispatchDir, id)
