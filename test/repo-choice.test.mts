@@ -2,9 +2,14 @@
 // sites used to pass the session's repo to addWorktree, so a task in another
 // repo ran in a worktree of the wrong one.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
-import { chooseRepo, repoFromRemote, resolveDispatchRepo } from "../lib/office.ts";
+import { chooseRepo, repoFromRemote, resolveDispatchRepo, siblingCheckouts } from "../lib/office.ts";
 
 test("a checkout is matched by its remote, not its directory name", () => {
   assert.equal(repoFromRemote("https://github.com/az-iar/agent-office.git"), "az-iar/agent-office");
@@ -68,4 +73,34 @@ test("a task repo in another case or as a URL still matches", () => {
 
 test("a task naming no repo keeps the session's", () => {
   assert.deepEqual(resolveDispatchRepo("/work/ao-pi", "", () => []), { path: "/work/ao-pi" });
+});
+
+test("a real git worktree beside its repository is not a second checkout", () => {
+  // Built with real `git worktree add`, not two clones: a worktree shares its
+  // origin *and* its git common dir, which is the case that made the first
+  // version refuse every dispatch (neo, ao-pi#17 review).
+  const root = mkdtempSync(join(tmpdir(), "ao-dispatch-"))
+  const repo = join(root, "agent-office")
+  mkdirSync(repo);
+  spawnSync("git", ["-C", repo, "init", "-q"]);
+  spawnSync("git", ["-C", repo, "remote", "add", "origin", "git@github.com:az-iar/agent-office.git"]);
+  writeFileSync(join(repo, "README.md"), "x\n");
+  spawnSync("git", ["-C", repo, "add", "-A"]);
+  spawnSync("git", ["-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+  const tree = join(root, "agent-office-office-abc12345");
+  const added = spawnSync("git", ["-C", repo, "worktree", "add", "-q", "-b", "office/abc12345", tree]);
+  assert.equal(added.status, 0, String(added.stderr));
+
+  const chosen = resolveDispatchRepo(join(root, "ao-pi"), "az-iar/agent-office", siblingCheckouts);
+  assert.deepEqual(chosen, { path: repo }, "the main checkout, not its worktree");
+});
+
+test("both dispatch sites go through the resolver", () => {
+  // Source-level, because the drift neo caught was exactly a site keeping its own
+  // call to addWorktree(repo, …) after the other was fixed.
+  for (const file of ["index.ts", "poll.ts"]) {
+    const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", file), "utf8");
+    assert.ok(text.includes("resolveDispatchRepo("), `${file} does not call resolveDispatchRepo`);
+    assert.ok(!/addWorktree\((?!dispatchRepo)/.test(text.replace(/addWorktree\(dispatchRepo/g, "")), `${file} still calls addWorktree with something else`);
+  }
 });

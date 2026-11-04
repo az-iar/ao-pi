@@ -708,3 +708,27 @@ export function resolveDispatchRepo(
   if (!wanted) return { path: sessionRepo }
   return chooseRepo(wanted, dedupeCandidates(list(sessionRepo)))
 }
+
+// siblingCheckouts lists the checkouts beside a repository: the root itself and
+// every directory next to it, each with its origin and its git common dir. The
+// common dir is what tells a linked worktree from a separate clone, so callers
+// can count one repository once (agent-office#540).
+export function siblingCheckouts(root: string): { path: string; remote?: string; commonDir?: string }[] {
+  const gitOut = (path: string, args: string[]) => {
+    const r = spawnSync("git", ["-C", path, ...args], { encoding: "utf8" })
+    return r.status === 0 ? r.stdout.trim() : undefined
+  }
+  // --path-format=absolute matters: a main checkout answers `.git` (relative) while
+  // its worktree answers an absolute path, so the two would never compare equal and
+  // dedupe would silently do nothing. The real-git test caught exactly that.
+  const common = (path: string) => gitOut(path, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+  const candidates = [{ path: root, remote: gitOut(root, ["remote", "get-url", "origin"]), commonDir: common(root) }]
+  try {
+    for (const name of readdirSync(dirname(root))) {
+      const path = join(dirname(root), name)
+      if (path === root) continue
+      candidates.push({ path, remote: gitOut(path, ["remote", "get-url", "origin"]), commonDir: common(path) })
+    }
+  } catch {}
+  return candidates
+}

@@ -68,6 +68,7 @@ import {
   tokenRequest,
   workspaceKey,
   resolveDispatchRepo,
+  siblingCheckouts,
 } from "./lib/office.ts"
 
 const configuredCallbackPort = Number(process.env.AGENT_OFFICE_CALLBACK_PORT ?? 41997)
@@ -710,26 +711,7 @@ export default function agentOffice(pi: ExtensionAPI) {
       const wantedRepo = String((task as any)?.repo ?? "").trim()
       let dispatchRepo = repo
       if (wantedRepo) {
-        const beside = (sessionRepo: string) => {
-          const remoteOf = (path: string) => {
-            const r = spawnSync("git", ["-C", path, "remote", "get-url", "origin"], { encoding: "utf8" })
-            return r.status === 0 ? r.stdout.trim() : undefined
-          }
-          const commonOf = (path: string) => {
-            const r = spawnSync("git", ["-C", path, "rev-parse", "--git-common-dir"], { encoding: "utf8" })
-            return r.status === 0 ? r.stdout.trim() : undefined
-          }
-          const candidates = [{ path: sessionRepo, remote: remoteOf(sessionRepo), commonDir: commonOf(sessionRepo) }]
-          try {
-            for (const name of readdirSync(dirname(sessionRepo))) {
-              const path = join(dirname(sessionRepo), name)
-              if (path === sessionRepo) continue
-              candidates.push({ path, remote: remoteOf(path), commonDir: commonOf(path) })
-            }
-          } catch {}
-          return candidates
-        }
-        const chosen = resolveDispatchRepo(repo, wantedRepo, beside)
+        const chosen = resolveDispatchRepo(repo, wantedRepo, siblingCheckouts)
         if ("error" in chosen) {
           notice(`Agent Office: not dispatching task ${id}: ${chosen.error}`, "error")
           if (assignedKey) seenAssigned.delete(assignedKey)
