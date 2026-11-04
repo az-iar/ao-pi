@@ -8,9 +8,9 @@
 
 import { spawn, spawnSync } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { realpathSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { basename, dirname, join, sep } from "node:path"
+import { basename, dirname, isAbsolute, join, sep } from "node:path"
 
 export const OFFICE = (process.env.AGENT_OFFICE_URL?.trim() || "https://office.byma.tech").replace(/\/+$/, "")
 export const CREDENTIALS_OVERRIDE = process.env.AGENT_OFFICE_PI_CREDENTIALS
@@ -731,4 +731,39 @@ export function siblingCheckouts(root: string): { path: string; remote?: string;
     }
   } catch {}
   return candidates
+}
+
+// A dispatched worker may write only inside the worktree it was spawned with.
+//
+// agent-office#551: task 4c8aeedd's body named another repository's worktree, the
+// dispatch prompt embeds a task body verbatim, and the worker's transcript shows
+// an `edit` against that absolute path. The cwd was right; the path came from the
+// prompt, so a cwd check would not have caught it.
+export function outsideWorktree(root: string, target: string, resolve = realpathSync): string | undefined {
+  if (!target) return undefined
+  const absolute = isAbsolute(target) ? target : join(root, target)
+  // realpath the target when it exists, and its nearest existing ancestor for a
+  // file that does not exist yet, so a symlink pointing outside is caught rather
+  // than followed blindly.
+  let probe = absolute
+  for (;;) {
+    try {
+      probe = resolve(probe)
+      break
+    } catch {
+      const parent = dirname(probe)
+      if (parent === probe) break
+      probe = parent
+    }
+  }
+  const base = (() => {
+    try {
+      return resolve(root)
+    } catch {
+      return root
+    }
+  })()
+  const inside = probe === base || probe.startsWith(base.endsWith(sep) ? base : base + sep)
+  if (inside) return undefined
+  return `refusing to write outside this task's worktree: ${absolute} is not inside ${base}`
 }

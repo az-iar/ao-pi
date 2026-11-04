@@ -69,6 +69,7 @@ import {
   workspaceKey,
   resolveDispatchRepo,
   siblingCheckouts,
+  outsideWorktree,
 } from "./lib/office.ts"
 
 const configuredCallbackPort = Number(process.env.AGENT_OFFICE_CALLBACK_PORT ?? 41997)
@@ -907,6 +908,20 @@ export default function agentOffice(pi: ExtensionAPI) {
     await connectMcp()
     startPolling()
   })
+  // A dispatched worker writes only inside the worktree it was spawned with. The
+  // cwd is not the hole: task 4c8aeedd's body named another repo's worktree, the
+  // prompt embeds a body verbatim, and the worker's transcript shows an `edit` on
+  // that absolute path (agent-office#551). bash is not covered here - it cannot
+  // be, from a tool guard - so this is a backstop, not the whole fix.
+  pi.on("tool_call", async (event) => {
+    if (process.env.AGENT_OFFICE_CHILD !== "1") return
+    const name = String((event as any)?.toolName ?? "")
+    if (name !== "edit" && name !== "write") return
+    const target = String((event as any)?.input?.path ?? "")
+    const refusal = outsideWorktree(process.cwd(), target)
+    if (refusal) return { block: true, reason: refusal }
+  })
+
   pi.on("agent_start", async (_event, ctx) => {
     lastCtx = ctx
     startWorking()
