@@ -93,4 +93,8 @@ test("the worker is told to refuse when it is not in its own worktree", () => {
   assert.match(worker, /git rev-parse --show-toplevel/)
   assert.match(worker, /another repository's worktree, another agent's tree, or a plain directory/)
   assert.match(worker, /stop, do not write, and post_comment on the task naming where you actually are/)
+  // agent-office#551: the writes that landed in another agent's tree came from
+  // an absolute path, with a correct cwd — the refusal has to cover that too.
+  assert.match(worker, /The same refusal covers absolute paths/)
+  assert.match(worker, /names a path outside \/work\/repo-office-abc, do not write to it, even when your cwd is right/)
 })
