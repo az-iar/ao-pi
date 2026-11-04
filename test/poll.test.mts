@@ -64,7 +64,7 @@ test("session selection pins poll and child, and unknown sessions fail closed", 
   reset()
   const ws = workspace()
   const config = join(ws.root, ".config", "agent-office", "pi")
-  const sessions = join(config, "sessions")
+  const sessions = join(dirname(config), "sessions")
   const agents = join(config, "agents")
   mkdirSync(sessions, { recursive: true })
   mkdirSync(agents, { recursive: true })

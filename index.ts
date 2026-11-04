@@ -69,6 +69,8 @@ import {
   releaseWorkScope,
   releaseNotice,
   resolveCredentials,
+  saveSessionAgent,
+  sessionAgentOf,
   saveAgentPointers,
   saveAgentPointer,
   sessionPointerPath,
@@ -392,7 +394,7 @@ export default function agentOffice(pi: ExtensionAPI) {
     // agent, so the honest header is none - a stale pointer would name a
     // different agent and earn a 409 on every call.
     const pointerChoseCredentials = (speaksAsOwn || approvedHere) && !usingCredentialsOverride && !process.env.AGENT_OFFICE_TOKEN
-    const sessionAgent = pointerChoseCredentials && sessionId ? loadAgentPointer(sessionPointerPath(sessionId)) : undefined
+    const sessionAgent = pointerChoseCredentials && sessionId ? sessionAgentOf(sessionId) : undefined
     if (sessionAgent) headers["X-Office-Session-Agent"] = sessionAgent
     if (isChild) {
       // via names the child and the parent it was started from: the parent is
@@ -439,7 +441,7 @@ export default function agentOffice(pi: ExtensionAPI) {
       const current = loadCredentials(target)
       if (!current || !sameCredentials(current, auth.credentials)) saveCredentials(target, auth.credentials)
     }
-    if (sessionId && loadAgentPointer(sessionPointerPath(sessionId)) !== slug) saveAgentPointer(sessionPointerPath(sessionId), slug)
+    if (sessionId && sessionAgentOf(sessionId) !== slug) saveSessionAgent(sessionId, slug)
     if (credentialsFile !== target) {
       credentialsFile = target
       // Only an approval in this process makes a worktree's pointer its own; a
@@ -995,7 +997,7 @@ export default function agentOffice(pi: ExtensionAPI) {
     // checkout's. Such a worktree connects only through its own marked pointer,
     // so the session pointer is not read there at all.
     if (!usingCredentialsOverride && sessionId && !isUnconnectedWorktree(directory)) {
-      const savedAgent = loadAgentPointer(sessionPointerPath(sessionId))
+      const savedAgent = sessionAgentOf(sessionId)
       if (savedAgent) {
         credentialsFile = agentCredentialsPath(savedAgent)
         auth.credentials = loadCredentials(credentialsFile)
