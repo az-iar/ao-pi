@@ -754,10 +754,16 @@ export function sandboxArgs(paths: SandboxPaths): string[] {
   // Write access, narrowest last: a later bind overrides an earlier one.
   args.push("--bind", paths.worktree, paths.worktree)
   args.push("--bind", paths.gitDir, paths.gitDir)
-  args.push("--ro-bind", join(paths.gitDir, "config"), join(paths.gitDir, "config"))
-  args.push("--ro-bind", join(paths.gitDir, "hooks"), join(paths.gitDir, "hooks"))
-  args.push("--bind", paths.piState, paths.piState)
-  for (const cache of paths.caches) args.push("--bind", cache, cache)
+  // bwrap refuses a bind whose source is missing, so only existing paths are bound:
+  // a cache that has never been used, or a repo with no .git/hooks, must not turn
+  // every dispatch into a launch failure (neo, ao-pi#22).
+  const bindIfPresent = (flag: string, path: string) => {
+    if (existsSync(path)) args.push(flag, path, path)
+  }
+  bindIfPresent("--ro-bind", join(paths.gitDir, "config"))
+  bindIfPresent("--ro-bind", join(paths.gitDir, "hooks"))
+  bindIfPresent("--bind", paths.piState)
+  for (const cache of paths.caches) bindIfPresent("--bind", cache)
   return args
 }
 
@@ -766,10 +772,34 @@ export function sandboxArgs(paths: SandboxPaths): string[] {
 // mount-policy regression cannot stop every dispatch at once.
 export function sandboxedWorker(bin: string, argv: string[], paths: SandboxPaths, enabled: boolean): string[] | undefined {
   if (!enabled) return undefined
-  return [bin, ...sandboxArgs(paths), ...argv].map((part, index) => (index === 0 ? part : part))
+  if (!sandboxAvailable()) {
+    // Flag on and no bwrap must never mean "ran unsandboxed anyway": that is the
+    // one outcome nobody would notice (neo, ao-pi#22).
+    throw new Error("AGENT_OFFICE_SANDBOX=1 but bwrap is unavailable here; refusing to run the worker unsandboxed")
+  }
+  return [bin, ...sandboxArgs(paths), ...argv]
+}
+
+// sandboxAvailable answers whether the sandbox can run at all: bwrap present and
+// unprivileged user namespaces permitted.
+export function sandboxAvailable(): boolean {
+  return spawnSync("bwrap", ["--version"]).status === 0 && spawnSync("unshare", ["--user", "--map-root-user", "true"]).status === 0
 }
 
 export const SANDBOX_BIN = "bwrap"
+
+// workerSandboxPaths is what the worker's sandbox mounts, derived from its worktree.
+// gitCommonDir answers an ABSOLUTE path, so it must not be joined onto the worktree:
+// path.join does not reset on an absolute segment, and the missing bind source makes
+// bwrap refuse to start - every dispatch fails with the flag on (neo, ao-pi#22).
+export function workerSandboxPaths(worktree: string): SandboxPaths {
+  return {
+    worktree,
+    gitDir: gitCommonDir(worktree) ?? join(worktree, ".git"),
+    piState: join(homedir(), ".config", "pig", "agent"),
+    caches: [join(homedir(), ".npm"), join(homedir(), ".cache", "go-build"), join(homedir(), "go", "pkg", "mod")],
+  }
+}
 
 // gitCommonDir reads a checkout's shared git dir, absolute: a linked worktree's
 // `.git` is a file pointing at `<repo>/.git/worktrees/<name>`, and the directory a

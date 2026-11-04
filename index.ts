@@ -71,7 +71,7 @@ import {
   siblingCheckouts,
   sandboxedWorker,
   SANDBOX_BIN,
-  gitCommonDir,
+  workerSandboxPaths,
 } from "./lib/office.ts"
 
 const configuredCallbackPort = Number(process.env.AGENT_OFFICE_CALLBACK_PORT ?? 41997)
@@ -736,12 +736,15 @@ export default function agentOffice(pi: ExtensionAPI) {
       // AGENT_OFFICE_SANDBOX=1 runs the worker's shell with only its worktree and
       // the git data a commit writes writable (agent-office#551).
       const sandboxOn = process.env.AGENT_OFFICE_SANDBOX === "1"
-      const workerArgs = sandboxedWorker(SANDBOX_BIN, [PI_BIN, "-e", HERE, "--print", prompt], {
-        worktree: path,
-        gitDir: join(path, gitCommonDir(path) ?? ".git"),
-        piState: join(homedir(), ".config", "pig", "agent"),
-        caches: [join(homedir(), ".npm"), join(homedir(), ".cache", "go-build"), join(homedir(), "go", "pkg", "mod")],
-      }, sandboxOn)
+      let workerArgs: string[] | undefined
+      try {
+        workerArgs = sandboxedWorker(SANDBOX_BIN, [PI_BIN, "-e", HERE, "--print", prompt], workerSandboxPaths(path), sandboxOn)
+      } catch (err) {
+        // Refuse the dispatch rather than run the worker unsandboxed.
+        notice(`Agent Office: not dispatching task ${id}: ${String(err instanceof Error ? err.message : err)}`, "error")
+        if (assignedKey) seenAssigned.delete(assignedKey)
+        return
+      }
       const [workerBin, ...restArgs] = workerArgs ?? [PI_BIN, "-e", HERE, "--print", prompt]
       const result = await run(workerBin, restArgs, path, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile }).catch((err) => {
         warn("could not start the worker", { task: id, error: String(err) })

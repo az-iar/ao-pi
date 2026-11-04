@@ -7,9 +7,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { sandboxArgs } from "../lib/office.ts";
+import { sandboxArgs, workerSandboxPaths } from "../lib/office.ts";
 
-const paths = { worktree: "/w/tree", gitDir: "/w/tree/.git", piState: "/home/x/.config/pig/agent", caches: ["/home/x/.npm"] };
+// Real directories, because only existing paths are bound (a missing bind source
+// makes bwrap refuse to start, which is the second bug neo found).
+const fixture = mkdtempSync(join(tmpdir(), "ao-argv-"));
+const paths = {
+  worktree: join(fixture, "tree"),
+  gitDir: join(fixture, "tree", ".git"),
+  piState: join(fixture, "pi-state"),
+  caches: [join(fixture, "npm")],
+};
+for (const dir of [paths.worktree, join(paths.gitDir, "hooks"), paths.piState, paths.caches[0]]) mkdirSync(dir, { recursive: true });
+writeFileSync(join(paths.gitDir, "config"), "[core]\n");
 
 test("the mount order puts the read-only exceptions on top of the writable git dir", () => {
   // A later bind overrides an earlier one, so `.git` writable then `config` and
@@ -18,12 +28,12 @@ test("the mount order puts the read-only exceptions on top of the writable git d
   const args = sandboxArgs(paths);
   const flat = args.join(" ");
   assert.equal(args[0], "--ro-bind", "everything starts read-only");
-  const git = flat.indexOf("--bind /w/tree/.git /w/tree/.git");
-  const config = flat.indexOf("--ro-bind /w/tree/.git/config /w/tree/.git/config");
-  const hooks = flat.indexOf("--ro-bind /w/tree/.git/hooks /w/tree/.git/hooks");
+  const git = flat.indexOf(`--bind ${paths.gitDir} ${paths.gitDir}`);
+  const config = flat.indexOf(`--ro-bind ${join(paths.gitDir, "config")} ${join(paths.gitDir, "config")}`);
+  const hooks = flat.indexOf(`--ro-bind ${join(paths.gitDir, "hooks")} ${join(paths.gitDir, "hooks")}`);
   assert.ok(git > 0 && config > git && hooks > git, `order was ${flat}`);
   assert.ok(flat.includes("--tmpfs /tmp"), "a worker needs a writable temp dir");
-  assert.ok(flat.includes("--bind /home/x/.config/pig/agent"), "Pi writes its transcript every turn");
+  assert.ok(flat.includes(`--bind ${paths.piState}`), "Pi writes its transcript every turn");
 });
 
 // The behavioural tests need bubblewrap and unprivileged user namespaces. They
@@ -71,4 +81,25 @@ test("a write outside the worktree fails, and a commit inside it still works", {
   assert.match(out, /INSIDE_OK/, out);
   assert.match(out, /COMMIT_OK/, out);
   assert.match(out, /PUSH_OK/, out);
+});
+
+test("workerSandboxPaths points at the real common dir of a linked worktree", () => {
+  // The bug this pins: gitCommonDir answers an absolute path, and joining it onto
+  // the worktree produced <worktree>/<abs>/.git, which bwrap then refused as a
+  // missing bind source - every dispatch failed with the flag on (neo, ao-pi#22).
+  const root = mkdtempSync(join(tmpdir(), "ao-paths-"));
+  const repo = join(root, "repo");
+  mkdirSync(repo);
+  spawnSync("git", ["-C", repo, "init", "-q"]);
+  spawnSync("git", ["-C", repo, "remote", "add", "origin", "git@github.com:az-iar/agent-office.git"]);
+  writeFileSync(join(repo, "a.txt"), "a\n");
+  spawnSync("git", ["-C", repo, "add", "-A"]);
+  spawnSync("git", ["-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+  const tree = join(root, "tree");
+  assert.equal(spawnSync("git", ["-C", repo, "worktree", "add", "-q", "-b", "office/y", tree]).status, 0);
+
+  const paths = workerSandboxPaths(tree);
+  assert.equal(paths.worktree, tree);
+  assert.equal(paths.gitDir, join(repo, ".git"), "the shared git dir, not a path under the worktree");
+  assert.ok(!paths.gitDir.startsWith(tree), "and never <worktree>/<absolute path>");
 });
