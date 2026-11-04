@@ -641,3 +641,39 @@ export function cronLine(directory: string, pollScript: string, path = process.e
   const runtime = pollScript.includes(`${sep}node_modules${sep}`) ? "bun" : "node"
   return `*/2 * * * * cd ${quote(directory)} && PATH=${quote(path)} ${runtime} ${quote(pollScript)}${credentialsFile ? ` --credentials ${quote(credentialsFile)}` : sessionId ? ` --session ${quote(sessionId)}` : ""} >> "$HOME/.config/agent-office/pi/poll.log" 2>&1`
 }
+
+// A dispatch must run in the *task's* repository, not the session's: the two
+// dispatch sites used to pass the process's own repo to addWorktree, so a task in
+// another repo got a worktree of the wrong one and a worker writing into it
+// (agent-office#540).
+//
+// repoFromRemote reads `origin` and returns its `owner/name`, so a checkout is
+// matched by where it pushes rather than by what its directory is called: a
+// directory that merely looks like the name, or a second clone of the same
+// repository, is exactly how a worker ends up in the wrong tree.
+export function repoFromRemote(remote: string): string | undefined {
+  // Normalise before comparing: `git@github.com:owner/name.git`,
+  // `https://github.com/owner/name` and a case difference all mean the same
+  // checkout, and a matcher that treats them as different fires the refuse path
+  // on real repositories (neo, agent-office#540).
+  const cleaned = remote.trim().toLowerCase().replace(/\/+$/, "").replace(/\.git$/, "")
+  // A host is required: `https://host/owner/name` or `git@host:owner/name`. A bare
+  // path like /srv/git/agent-office names no owner, and matching it would let any
+  // directory whose last two segments look right pass as the task's repo.
+  const match = cleaned.match(/^(?:[a-z+]+:\/\/[^/]+\/|[\w.-]+@[\w.-]+:)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/i)
+  return match ? `${match[1]}/${match[2]}` : undefined
+}
+
+export type RepoChoice = { path: string } | { error: string }
+
+// chooseRepo picks the checkout for a task's repo from the candidates beside the
+// session's checkout. It refuses rather than guesses: no match, or more than one,
+// is an error naming what it found.
+export function chooseRepo(wanted: string, candidates: { path: string; remote?: string }[]): RepoChoice {
+  const matches = candidates.filter((candidate) => candidate.remote && repoFromRemote(candidate.remote) === wanted)
+  if (matches.length === 1) return { path: matches[0].path }
+  if (matches.length === 0) {
+    return { error: `no local checkout of ${wanted} beside this one; add it to the workspace or clear the task's repo` }
+  }
+  return { error: `${matches.length} checkouts of ${wanted} beside this one (${matches.map((m) => m.path).join(", ")}); refusing to guess which one` }
+}
