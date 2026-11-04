@@ -3,6 +3,12 @@
 //   /office [name]     connects: OAuth in the browser, Azri approves, the token
 //                      is stored under the agent name, and the Office MCP tools
 //                      appear in Pi. The name pre-fills a new agent.
+//   /office session [name]
+//                      continues a previous conversation in this folder by its
+//                      /name (exact, else a unique prefix or substring, else the
+//                      list of named sessions). The resumed chat keeps talking as
+//                      the same Office agent, because the identity is the
+//                      folder's pointer and the history is the session file.
 //   while running      `working` while this Pi session streams or a dispatched
 //                      worker runs, a heartbeat every 90 s, `idle` once both
 //                      settle; `idle` never overrides `blocked`. New assigned
@@ -24,7 +30,8 @@
 //
 // Tokens are never logged.
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
+import { SessionManager } from "@earendil-works/pi-coding-agent"
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { Type } from "@earendil-works/pi-ai"
 import { spawn, spawnSync } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
@@ -33,6 +40,7 @@ import { createServer } from "node:http"
 import { homedir, hostname } from "node:os"
 import { basename, dirname, join, sep } from "node:path"
 import { fileURLToPath } from "node:url"
+import { type SessionChoice, message as sessionMessage, pickSession } from "./lib/sessions.ts"
 import {
   type Credentials,
   acquireDispatch,
@@ -953,6 +961,48 @@ export default function agentOffice(pi: ExtensionAPI) {
   })
 
   // --- /office command ---
+  // `/office session [name]` continues a previous conversation in this folder by
+  // its /name, which is how a resumed session keeps the Office agent it was
+  // working as: the identity is the directory's pointer, the history is the
+  // session file. Nothing is guessed - an ambiguous name lists the candidates.
+  async function resumeSession(query: string, ctx: ExtensionCommandContext) {
+    if (isChild) {
+      ctx.ui.notify("A headless child session has no conversation to resume.", "warning")
+      return
+    }
+    let infos
+    try {
+      infos = await SessionManager.list(ctx.cwd || directory)
+    } catch (err) {
+      ctx.ui.notify(`Could not read this folder's sessions: ${err instanceof Error ? err.message : String(err)}`, "error")
+      return
+    }
+    const choice: SessionChoice = pickSession(infos, query)
+    const text = sessionMessage(choice, ctx.sessionManager.getSessionFile())
+    if (choice.kind !== "resume") {
+      ctx.ui.notify(text, "info")
+      wake(text)
+      return
+    }
+    // After a switch this ctx is stale, so the report goes out first and any
+    // work on the new session happens inside withSession.
+    ctx.ui.notify(text, "info")
+    const switched = await ctx.switchSession(choice.session.path, {
+      withSession: async (next) => {
+        // A resumed conversation keeps talking as the same Office agent: say so
+        // once, so the transcript shows the identity the next turn runs under.
+        if (ownAgent?.slug) {
+          await next.sendMessage({
+            customType: "office-session",
+            content: `Resumed as @${ownAgent.slug} (Office agent ${ownAgent.id ?? ownAgent.slug}).`,
+            display: true,
+          })
+        }
+      },
+    })
+    if (switched.cancelled) ctx.ui.notify("Session switch cancelled.", "info")
+  }
+
   pi.registerCommand("office", {
     description: "Connect to Agent Office: register an agent, check status, or reconnect",
     handler: async (args, ctx) => {
@@ -970,6 +1020,10 @@ export default function agentOffice(pi: ExtensionAPI) {
           const report = statusReport()
           ctx.ui.notify(report, "info")
           wake(`Agent Office status:\n${report}`)
+          return
+        }
+        if (verb === "session") {
+          await resumeSession(argument, ctx)
           return
         }
         // "Already connected" means this session owns an identity, not that some
