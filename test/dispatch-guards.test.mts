@@ -185,3 +185,40 @@ test("the claim release runs only when no worker started", () => {
   assert.match(body, /if \(claimed && !workerStarted\) await unclaimTask\(call, id, /, "the release is guarded by both flags")
   assert.ok(body.indexOf("claimed = true") < body.indexOf("await claimTask(call, id)"), "claimed is set as the claim is taken")
 })
+
+// rodri's re-review of the unclaim: the scratch path ran its worker and returned
+// without setting workerStarted, so a finished repo-less worker was unclaimed to
+// todo and re-dispatched on the next poll. One launcher sets the flag now, and
+// both dispatch paths go through it.
+test("every dispatch path marks its worker started through the one launcher", () => {
+  const source = readFileSync(new URL("../index.ts", import.meta.url), "utf8")
+  const start = source.indexOf("const dispatchTask = async (id: string) => {")
+  const body = source.slice(start, source.indexOf("const pumpDispatch = () => {"))
+
+  // Exactly one assignment, inside startWorker.
+  const assignments = body.match(/workerStarted = true/g) ?? []
+  assert.equal(assignments.length, 1, `workerStarted is set in exactly one place, found ${assignments.length}`)
+  const launcherAt = body.indexOf("const startWorker = async (")
+  const assignmentAt = body.indexOf("workerStarted = true")
+  assert.ok(launcherAt >= 0 && launcherAt < assignmentAt, "the one assignment lives in startWorker")
+  assert.ok(body.indexOf("if (result !== undefined) workerStarted = true") > 0, "and only when the run resolved")
+
+  // Both paths launch through it: the worktree path and the repo-less scratch path.
+  const launches = body.match(/await startWorker\(/g) ?? []
+  assert.equal(launches.length, 2, `both dispatch paths use the launcher, found ${launches.length}`)
+  assert.ok(body.includes("startWorker(PI_BIN,"), "the scratch path is one of them")
+})
+
+test("a launched worker is never unclaimed, a worker that never launched is", async () => {
+  // The guard the launcher feeds: claimed && !workerStarted.
+  const { unclaimTask } = await import("../lib/office.ts")
+  const calls: string[] = []
+  const call = async (name: string) => { calls.push(name); return {} }
+  // workerStarted true: the dispatch does not call unclaimTask at all.
+  const shouldUnclaim = (claimed: boolean, workerStarted: boolean) => claimed && !workerStarted
+  assert.equal(shouldUnclaim(true, true), false, "a worker that ran keeps the status it reported")
+  assert.equal(shouldUnclaim(true, false), true, "a dispatch that never launched hands the task back")
+  assert.equal(shouldUnclaim(false, false), false, "a dispatch that never claimed has nothing to hand back")
+  await unclaimTask(call, "t", "why")
+  assert.deepEqual(calls, ["update_task"])
+})

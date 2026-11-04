@@ -734,6 +734,19 @@ export default function agentOffice(pi: ExtensionAPI) {
     // Whether the task was claimed (flipped to in_progress): an abort after that
     // has to put it back to todo, or the task is stranded and unretryable.
     let claimed = false
+    // The one place a worker is launched, and the one place workerStarted is set:
+    // both the worktree path and the repo-less scratch path go through it, so a
+    // path cannot claim the task and forget to say its worker ran (rodri on
+    // ao-pi#4: the scratch path did exactly that, and its finished worker was
+    // unclaimed to todo and re-dispatched on the next poll).
+    const startWorker = async (bin: string, args: string[], cwd: string) => {
+      const result = await run(bin, args, cwd, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile }).catch((err) => {
+        warn("could not start the worker", { task: id, error: String(err) })
+        return undefined
+      })
+      if (result !== undefined) workerStarted = true
+      return result
+    }
     try {
       const detail = await call("get_task", { task_id: id }).catch(() => undefined)
       const task = (detail as any)?.task ?? detail
@@ -779,10 +792,7 @@ export default function agentOffice(pi: ExtensionAPI) {
       if (target.kind === "scratch") {
         const scratch = scratchTaskDir(id)
         mkdirSync(scratch, { recursive: true })
-        const result = await run(PI_BIN, ["-e", HERE, "--print", scratchPrompt(id, task, scratch)], scratch, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile }).catch((err) => {
-          warn("could not start the worker", { task: id, error: String(err) })
-          return undefined
-        })
+        const result = await startWorker(PI_BIN, ["-e", HERE, "--print", scratchPrompt(id, task, scratch)], scratch)
         if (result === undefined) {
           if (assignedKey) seenAssigned.delete(assignedKey)
           return
@@ -820,17 +830,13 @@ export default function agentOffice(pi: ExtensionAPI) {
         return
       }
       const [workerBin, ...restArgs] = workerArgs ?? [PI_BIN, "-e", HERE, "--print", prompt]
-      const result = await run(workerBin, restArgs, path, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile }).catch((err) => {
-        warn("could not start the worker", { task: id, error: String(err) })
-        return undefined
-      })
+      const result = await startWorker(workerBin, restArgs, path)
       if (result === undefined) {
         // The worker never started: a missing binary or environment problem is
         // retryable, unlike a worker that ran and exited non-zero.
         if (assignedKey) seenAssigned.delete(assignedKey)
         return
       }
-      workerStarted = true
       notice(`Agent Office task ${id} worker exited (${result?.code ?? "error"}). Review ${path}; it opens the PR and updates the task.`)
     } catch (err) {
       if (!workerStarted && assignedKey) seenAssigned.delete(assignedKey)
