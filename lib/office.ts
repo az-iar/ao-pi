@@ -732,3 +732,79 @@ export function siblingCheckouts(root: string): { path: string; remote?: string;
   } catch {}
   return candidates
 }
+
+// A dispatched worker's shell runs inside a filesystem sandbox: the worktree and
+// the git data a commit writes are the only writable trees, and `.git/config` and
+// `.git/hooks` stay read-only on top because both are ways to run code outside it
+// (agent-office#551: a task body named another repo's worktree and the worker
+// wrote there through bash, which no prompt or tool guard can stop).
+export type SandboxPaths = {
+  worktree: string
+  // The repository's git dir (the common dir for a linked worktree): objects,
+  // refs, logs and FETCH_HEAD all live here and a commit or push writes them.
+  gitDir: string
+  // Pi's own state, which it writes on every turn.
+  piState: string
+  // Caches that must stay warm, or every dispatch re-downloads.
+  caches: string[]
+}
+
+export function sandboxArgs(paths: SandboxPaths): string[] {
+  const args = ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+  // Write access, narrowest last: a later bind overrides an earlier one.
+  args.push("--bind", paths.worktree, paths.worktree)
+  args.push("--bind", paths.gitDir, paths.gitDir)
+  // bwrap refuses a bind whose source is missing, so only existing paths are bound:
+  // a cache that has never been used, or a repo with no .git/hooks, must not turn
+  // every dispatch into a launch failure (neo, ao-pi#22).
+  const bindIfPresent = (flag: string, path: string) => {
+    if (existsSync(path)) args.push(flag, path, path)
+  }
+  bindIfPresent("--ro-bind", join(paths.gitDir, "config"))
+  bindIfPresent("--ro-bind", join(paths.gitDir, "hooks"))
+  bindIfPresent("--bind", paths.piState)
+  for (const cache of paths.caches) bindIfPresent("--bind", cache)
+  return args
+}
+
+// sandboxedWorker answers the argv for a sandboxed worker, or undefined when the
+// sandbox is off or unavailable. AGENT_OFFICE_SANDBOX=1 opts in per host, so a
+// mount-policy regression cannot stop every dispatch at once.
+export function sandboxedWorker(bin: string, argv: string[], paths: SandboxPaths, enabled: boolean): string[] | undefined {
+  if (!enabled) return undefined
+  if (!sandboxAvailable()) {
+    // Flag on and no bwrap must never mean "ran unsandboxed anyway": that is the
+    // one outcome nobody would notice (neo, ao-pi#22).
+    throw new Error("AGENT_OFFICE_SANDBOX=1 but bwrap is unavailable here; refusing to run the worker unsandboxed")
+  }
+  return [bin, ...sandboxArgs(paths), ...argv]
+}
+
+// sandboxAvailable answers whether the sandbox can run at all: bwrap present and
+// unprivileged user namespaces permitted.
+export function sandboxAvailable(): boolean {
+  return spawnSync("bwrap", ["--version"]).status === 0 && spawnSync("unshare", ["--user", "--map-root-user", "true"]).status === 0
+}
+
+export const SANDBOX_BIN = "bwrap"
+
+// workerSandboxPaths is what the worker's sandbox mounts, derived from its worktree.
+// gitCommonDir answers an ABSOLUTE path, so it must not be joined onto the worktree:
+// path.join does not reset on an absolute segment, and the missing bind source makes
+// bwrap refuse to start - every dispatch fails with the flag on (neo, ao-pi#22).
+export function workerSandboxPaths(worktree: string): SandboxPaths {
+  return {
+    worktree,
+    gitDir: gitCommonDir(worktree) ?? join(worktree, ".git"),
+    piState: join(homedir(), ".config", "pig", "agent"),
+    caches: [join(homedir(), ".npm"), join(homedir(), ".cache", "go-build"), join(homedir(), "go", "pkg", "mod")],
+  }
+}
+
+// gitCommonDir reads a checkout's shared git dir, absolute: a linked worktree's
+// `.git` is a file pointing at `<repo>/.git/worktrees/<name>`, and the directory a
+// commit writes is the common one.
+export function gitCommonDir(path: string): string | undefined {
+  const r = spawnSync("git", ["-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" })
+  return r.status === 0 ? r.stdout.trim() : undefined
+}
