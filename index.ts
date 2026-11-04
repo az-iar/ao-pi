@@ -67,7 +67,7 @@ import {
   taskID,
   tokenRequest,
   workspaceKey,
-  chooseRepo,
+  resolveDispatchRepo,
 } from "./lib/office.ts"
 
 const configuredCallbackPort = Number(process.env.AGENT_OFFICE_CALLBACK_PORT ?? 41997)
@@ -704,24 +704,32 @@ export default function agentOffice(pi: ExtensionAPI) {
       const detail = await call("get_task", { task_id: id }).catch(() => undefined)
       const task = (detail as any)?.task ?? detail
       await claimTask(call, id)
-      // Run in the task's repository, not this session's: both dispatch sites used
-      // to pass the process's own repo, so a task in another repo got a worktree
-      // of the wrong one (agent-office#540). A task naming no repo keeps the old
-      // behaviour.
+      // Run in the task's repository, not this session's (agent-office#540). The
+      // resolver refuses rather than guessing, and treats linked worktrees of one
+      // repository as one checkout.
+      const wantedRepo = String((task as any)?.repo ?? "").trim()
       let dispatchRepo = repo
-      const wanted = String((task as any)?.repo ?? "").trim()
-      if (wanted) {
-        const remoteOf = (path: string) => {
-          const r = spawnSync("git", ["-C", path, "remote", "get-url", "origin"], { encoding: "utf8" })
-          return r.status === 0 ? r.stdout.trim() : undefined
+      if (wantedRepo) {
+        const beside = (sessionRepo: string) => {
+          const remoteOf = (path: string) => {
+            const r = spawnSync("git", ["-C", path, "remote", "get-url", "origin"], { encoding: "utf8" })
+            return r.status === 0 ? r.stdout.trim() : undefined
+          }
+          const commonOf = (path: string) => {
+            const r = spawnSync("git", ["-C", path, "rev-parse", "--git-common-dir"], { encoding: "utf8" })
+            return r.status === 0 ? r.stdout.trim() : undefined
+          }
+          const candidates = [{ path: sessionRepo, remote: remoteOf(sessionRepo), commonDir: commonOf(sessionRepo) }]
+          try {
+            for (const name of readdirSync(dirname(sessionRepo))) {
+              const path = join(dirname(sessionRepo), name)
+              if (path === sessionRepo) continue
+              candidates.push({ path, remote: remoteOf(path), commonDir: commonOf(path) })
+            }
+          } catch {}
+          return candidates
         }
-        let beside: { path: string; remote?: string }[] = []
-        try {
-          beside = readdirSync(dirname(repo))
-            .filter((name) => name !== basename(repo))
-            .map((name) => ({ path: join(dirname(repo), name), remote: remoteOf(join(dirname(repo), name)) }))
-        } catch {}
-        const chosen = chooseRepo(wanted, [{ path: repo, remote: remoteOf(repo) }, ...beside])
+        const chosen = resolveDispatchRepo(repo, wantedRepo, beside)
         if ("error" in chosen) {
           notice(`Agent Office: not dispatching task ${id}: ${chosen.error}`, "error")
           if (assignedKey) seenAssigned.delete(assignedKey)

@@ -16,7 +16,7 @@
 // messages are not baselined. Tokens are never logged.
 
 import { spawn, spawnSync } from "node:child_process"
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { fileURLToPath } from "node:url"
@@ -44,6 +44,7 @@ import {
   supervisorPrompt,
   taskID,
   workspaceKey,
+  resolveDispatchRepo,
 } from "./lib/office.ts"
 
 const PI_BIN = process.env.AGENT_OFFICE_PI_BIN || "pig"
@@ -243,7 +244,37 @@ async function main(): Promise<number> {
           continue
         }
         await claimTask(call, id)
-        const { path, branch } = await addWorktree(canonicalRoot(directory), id, me.agent?.slug)
+        // The cron path had the same bug as the session path: it dispatched in the
+        // poller's repo rather than the task's (agent-office#540; neo's review of
+        // ao-pi#17 caught that only index.ts was fixed). One resolver, both sites.
+        const sessionRepo = canonicalRoot(directory)
+        const wantedRepo = String((current as any)?.repo ?? "").trim()
+        let dispatchRepo = sessionRepo
+        if (wantedRepo) {
+          const gitOut = (path: string, args: string[]) => {
+            const r = spawnSync("git", ["-C", path, ...args], { encoding: "utf8" })
+            return r.status === 0 ? r.stdout.trim() : undefined
+          }
+          const chosen = resolveDispatchRepo(sessionRepo, wantedRepo, (root) => {
+            const candidates = [{ path: root, remote: gitOut(root, ["remote", "get-url", "origin"]), commonDir: gitOut(root, ["rev-parse", "--git-common-dir"]) }]
+            try {
+              for (const name of readdirSync(dirname(root))) {
+                const path = join(dirname(root), name)
+                if (path === root) continue
+                candidates.push({ path, remote: gitOut(path, ["remote", "get-url", "origin"]), commonDir: gitOut(path, ["rev-parse", "--git-common-dir"]) })
+              }
+            } catch {}
+            return candidates
+          })
+          if ("error" in chosen) {
+            log(`not dispatching task ${id}: ${chosen.error}`)
+            failed.add(key)
+            releaseDispatch(dispatchDir, id)
+            continue
+          }
+          dispatchRepo = chosen.path
+        }
+        const { path, branch } = await addWorktree(dispatchRepo, id, me.agent?.slug)
         log(`dispatching task ${id} to ${path}`)
         let job: ReturnType<typeof runPi>
         try {
