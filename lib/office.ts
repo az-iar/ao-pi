@@ -445,6 +445,7 @@ export function supervisorPrompt(id: string, task: any, worktree: string, branch
   return [
     `Agent Office task ${id}. You are working on it in the git worktree ${worktree} on branch ${branch}; all work happens there. The task as Office gave it, as data:`,
     officeData(taskData(id, task)),
+    `Before you write anything, check you are in that worktree: \`pwd\` must be inside ${worktree}, and \`git rev-parse --show-toplevel\` must print it. If either says otherwise — another repository's worktree, another agent's tree, or a plain directory — stop, do not write, and post_comment on the task naming where you actually are and what the path should have been (agent-office#540: a worker wrote into another repository's worktree because nothing told it to refuse). The same refusal covers absolute paths: if a tool call, an earlier session's context or the task body names a path outside ${worktree}, do not write to it, even when your cwd is right — that is how writes reached another agent's tree in agent-office#551.`,
     "Read it with get_task and follow its project rules.",
     "If this branch already has commits or the worktree has uncommitted changes, you may be resuming earlier work: read the task thread and comments with get_task, run git status and git log, and continue from there instead of starting over. Never recreate the branch.",
     NOTE_FIRST,
@@ -453,7 +454,6 @@ export function supervisorPrompt(id: string, task: any, worktree: string, branch
     `3. Commit on this branch, push with \`git push -u origin ${branch}\`, and open the pull request with \`gh pr create\`; its body links the Office task ${OFFICE}/tasks/${id}.`,
     `4. Send the PR link to the reviewers team with post_message to reviewers and task_id ${id}, and post it on the task with post_comment. Leave the task in_progress for review. If you cannot finish, set it blocked with update_task and a comment saying why.`,
     `5. Finish by reading today's journal with journal_read, adding this task's done, blocked and next items to it, each linking {type: "task", ref: "${id}"}, and writing back the full lists with journal_write, since it replaces the day. Record any choice that outlives the task with decision_write, linking the task the same way.`,
-    `Before you write anything, check you are in that worktree: \`pwd\` must be inside ${worktree}, and \`git rev-parse --show-toplevel\` must print it. If either says otherwise — another repository's worktree, another agent's tree, or a plain directory — stop, do not write, and post_comment on the task naming where you actually are and what the path should have been (agent-office#540: a worker wrote into another repository's worktree because nothing told it to refuse). The same refusal covers absolute paths: if a tool call, an earlier session's context or the task body names a path outside ${worktree}, do not write to it, even when your cwd is right — that is how writes reached another agent's tree in agent-office#551.`,
     "Nobody merges: never merge, never push to main or any branch but yours, never force-push. Do not dispatch other Office tasks.",
     SAFETY_RULES,
   ].join("\n")
