@@ -108,10 +108,13 @@ export function fakeOffice() {
     calls,
     state,
     listen: () => new Promise<string>((r) => server.listen(0, "127.0.0.1", () => r(`http://127.0.0.1:${(server.address() as { port: number }).port}`))),
-    // Resolves with the first request that matches, including one already served,
+    // Resolves with the FIRST request that matches, including one already served,
     // and rejects with `message` when none arrives: a regression has to fail the
     // test in seconds rather than leave it pending. The timeout is a failure guard,
-    // not the wait - the wait itself is the request.
+    // not the wait - the wait itself is the request. Because it is the first match,
+    // the match has to identify the request, not merely its path: a path alone can
+    // be satisfied by another session's call, and the test then asserts against a
+    // request it did not mean (ao-pi#45).
     waitForCall: (match: (call: Call) => boolean, message: string, timeoutMs = 5_000) =>
       new Promise<Call>((resolve, reject) => {
         const served = calls.find(match)
