@@ -41,6 +41,7 @@ import { homedir, hostname } from "node:os"
 import { basename, dirname, join, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { type SessionChoice, message as sessionMessage, pickSession } from "./lib/sessions.ts"
+import { watchTask } from "./lib/task-watch.ts"
 import {
   type Credentials,
   acquireDispatch,
@@ -755,32 +756,31 @@ export default function agentOffice(pi: ExtensionAPI) {
     // ao-pi#4: the scratch path did exactly that, and its finished worker was
     // unclaimed to todo and re-dispatched on the next poll).
     const startWorker = async (bin: string, args: string[], cwd: string) => {
-      // A cancellation has to win over a dispatch already in flight (ao-pi#4):
-      // the task was read before the claim, and the worker can run for ten
+      // A cancellation has to win over a dispatch already in flight (ao-pi#4,
+      // #34): the task was read before the claim, and the worker can run for ten
       // minutes after it. Re-read the task while the worker runs and stop it when
-      // the office has cancelled or closed it - no unclaim, because the worker
-      // did start and the office owns the status it is now in.
+      // the office has cancelled it - no unclaim, because the worker did start
+      // and the office owns the status it is now in. Cancelled only: a worker
+      // that just marked its own task done may still be pushing or commenting,
+      // and killing it there would abort work that succeeded (vinn on ao-pi#33).
       const stop = new AbortController()
-      let watching = true
-      const watch = (async () => {
-        while (watching) {
-          await new Promise((resolve) => setTimeout(resolve, WORKER_STATUS_POLL_MS))
-          if (!watching) return
-          const now = await call("get_task", { task_id: id }).catch(() => undefined)
-          const status = String(((now as any)?.task ?? now)?.status ?? "").toLowerCase()
-          if (status === "cancelled" || status === "done") {
-            notice(`Agent Office: task ${id} is ${status}; stopping its worker.`)
-            stop.abort()
-            return
-          }
-        }
-      })()
+      const watch = watchTask({
+        readStatus: async () => {
+          const now = await call("get_task", { task_id: id })
+          return String(((now as any)?.task ?? now)?.status ?? "").toLowerCase()
+        },
+        stops: ["cancelled"],
+        onStop: (status: string) => {
+          notice(`Agent Office: task ${id} is ${status}; stopping its worker.`)
+          stop.abort()
+        },
+        intervalMs: WORKER_STATUS_POLL_MS,
+      })
       const result = await run(bin, args, cwd, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile }, stop.signal).catch((err) => {
         warn("could not start the worker", { task: id, error: String(err) })
         return undefined
       })
-      watching = false
-      await watch
+      watch.stop()
       if (result !== undefined) workerStarted = true
       return result
     }

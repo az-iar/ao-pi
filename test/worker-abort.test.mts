@@ -38,9 +38,10 @@ test("the dispatch watches its task while the worker runs", () => {
   const start = source.indexOf("const dispatchTask = async (id: string) => {")
   const body = source.slice(start, source.indexOf("const pumpDispatch = () => {"))
   assert.match(body, /await run\(bin, args, cwd, DISPATCH_STALE_MS, .*\}, stop\.signal\)/, "the worker runs with the abort signal")
-  assert.match(body, /status === "cancelled" \|\| status === "done"/, "it stops on cancelled and on done")
+  assert.match(body, /stops: \["cancelled"\]/, "it stops on cancelled only - done may still be pushing")
   assert.match(body, /stop\.abort\(\)/, "and aborts the run")
-  // The watcher must be given up when the worker ends, or a finished dispatch
-  // keeps calling get_task once a minute for ever.
-  assert.match(body, /watching = false\n\s*await watch/, "the watcher is stopped before the result is used")
+  // The watcher must be stopped when the worker ends, and stopping must be
+  // immediate: vinn on #33, a sleeping loop held every dispatch slot a poll long.
+  assert.match(body, /watch\.stop\(\)\n\s*if \(result !== undefined\) workerStarted = true/, "the watcher is stopped before the result is used")
+  assert.doesNotMatch(body, /while \(watching\)/, "no sleeping loop that cannot see the stop")
 })
