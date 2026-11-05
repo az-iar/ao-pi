@@ -110,6 +110,8 @@ New messages start one `pig -e <ao-pi> --print` in the workspace with the inbox 
 | `AGENT_OFFICE_POLL_MS` | `60000`, inbox poll interval; minimum `1000` |
 | `AGENT_OFFICE_AUTODISPATCH` | `on`; `off` keeps notifications but disables dispatch |
 
+The extension also sets one variable it never reads: `OPTCHAT_PROFILE`, when it is unset and the folder is connected, to that folder's Office agent, so pi-optchat opens that agent's memory instead of asking which profile it is. The profile has to exist in optchat already, or it warns and shows the picker; a value already in the environment wins, and a dispatched worker or a linked worktree nobody connected is left alone. It reaches interactive Pi only, because optchat reads it at its own `session_start` and picks no profile outside the TUI, so `pi -p` and `--mode rpc` still need `--optchat-profile`.
+
 ## Development
 
 ```sh

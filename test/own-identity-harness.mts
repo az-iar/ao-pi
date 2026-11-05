@@ -31,7 +31,9 @@ export async function harness(env: Record<string, string | undefined>) {
   process.env.HOME = home
   process.env.AGENT_OFFICE_URL = url
   process.env.AGENT_OFFICE_POLL_MS = "60000"
-  for (const k of ["AGENT_OFFICE_TOKEN", "AGENT_OFFICE_CHILD", "AGENT_OFFICE_PI_CREDENTIALS", "AGENT_OFFICE_AUTODISPATCH"]) delete process.env[k]
+  // OPTCHAT_PROFILE is the host's own environment when the suite runs inside Pi;
+  // the extension sets it, so a leftover would decide the outcome of a case.
+  for (const k of ["AGENT_OFFICE_TOKEN", "AGENT_OFFICE_CHILD", "AGENT_OFFICE_PI_CREDENTIALS", "AGENT_OFFICE_AUTODISPATCH", "OPTCHAT_PROFILE"]) delete process.env[k]
   for (const [k, v] of Object.entries(env)) if (v !== undefined) process.env[k] = v
   const lib = await import("../lib/office.ts")
   const { default: extension } = await import("../index.ts")

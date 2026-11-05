@@ -27,6 +27,9 @@
 //   AGENT_OFFICE_POLL_MS            inbox poll interval, default 60000
 //   AGENT_OFFICE_AUTODISPATCH       on (default) or off
 //   AGENT_OFFICE_CLIENT_NAME        OAuth client name; defaults to folder@host
+//   OPTCHAT_PROFILE                 not read: set to the folder's Office agent so
+//                                   pi-optchat opens that agent's memory, unless the
+//                                   environment already names a profile
 //
 // Tokens are never logged.
 
@@ -578,6 +581,32 @@ export default function agentOffice(pi: ExtensionAPI) {
   const assignedKeys = new Map<string, string>()
   const repo = canonical ?? directory
   const isChild = process.env.AGENT_OFFICE_CHILD === "1"
+  // pi-optchat keeps one memory per profile, and the profile that belongs to this
+  // folder is the Office agent the folder is connected as: pi in vinn's checkout
+  // opens vinn's memory instead of asking which profile it is. Two extensions share
+  // no state, only the environment, and optchat reads OPTCHAT_PROFILE when its own
+  // session_start runs - after every factory has loaded - so this is the channel
+  // (pi-optchat: the variable applies to interactive Pi; `pi -p` and `--mode rpc`
+  // still need --optchat-profile on the command line).
+  //
+  // Read here, not at session_start: the pointer is written by an approval and
+  // needs no network, and a value set from ao-pi's own session_start could land
+  // after optchat has chosen. The folder's pointer decides, so a session that speaks
+  // as another agent keeps the memory of the folder it runs in; switching is
+  // /optchat profile. An OPTCHAT_PROFILE already in the environment wins, which is
+  // also the opt-out.
+  //
+  // Never for a child or a dispatch grant: that worker is somebody's subagent, the
+  // profile it would open is locked by the Pi that started it, and its work must not
+  // land in that agent's memory. Never in a worktree nobody connected, whose repo
+  // pointer names the main checkout's agent instead (#476).
+  if (!isChild && !usingCredentialsOverride && !process.env.OPTCHAT_PROFILE?.trim() && !isUnconnectedWorktree(directory)) {
+    const slug = loadAgentPointer(pointerFile) ?? loadAgentPointer(repoPointerFile)
+    // optchat's own rule for a profile name (src/profiles.ts): a slug the office
+    // allows but optchat does not is left unset rather than set to something it
+    // would only warn about.
+    if (slug && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(slug)) process.env.OPTCHAT_PROFILE = slug
+  }
   // Whether this session was approved as an agent itself. A child inherits the
   // host's environment and pointer files but not this, which is the whole point:
   // identity is per session, never per machine or per directory (#476).
