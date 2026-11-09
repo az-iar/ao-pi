@@ -568,6 +568,41 @@ export function fromOthers(item: any, ownAgent?: { id?: string; slug?: string })
   return true
 }
 
+// Office's delivery switch, read from `me.agent` on every checkin. Only the exact
+// value stands a plugin down: any other value, including a server that sends no
+// field, keeps today's delivery path byte for byte (Office 6420db85 Bridge M3).
+export const isBridgeDelivery = (agent: any): boolean => agent?.delivery_mode === "bridge"
+
+export type LabelResult = { labeled: boolean; reason?: "no-agent" | "child" | "no-terminal" | "missing-hc" | "failed"; error?: string }
+
+// A bridge agent's wake reaches the pane labelled `ao.agent=<slug>` and
+// `ao.role=session`, so the interactive session labels its own herdr terminal.
+// Never a child: a worker carrying a session label would receive the agent's
+// wakes. argv, no shell string, and every failure is returned rather than thrown:
+// a missing hc is not an error worth reporting, a refused label is.
+export function labelSessionPane(slug: string | undefined, env: NodeJS.ProcessEnv = process.env): LabelResult {
+  if (!slug) return { labeled: false, reason: "no-agent" }
+  if (env.AGENT_OFFICE_CHILD === "1") return { labeled: false, reason: "child" }
+  const terminal = env.HC_TERMINAL_ID?.trim()
+  if (!terminal) return { labeled: false, reason: "no-terminal" }
+  try {
+    const result = spawnSync("hc", ["label", terminal, `ao.agent=${slug}`, "ao.role=session"], {
+      env,
+      encoding: "utf8",
+      timeout: 5_000,
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    if (result.error) {
+      if ((result.error as NodeJS.ErrnoException).code === "ENOENT") return { labeled: false, reason: "missing-hc" }
+      return { labeled: false, reason: "failed", error: String(result.error) }
+    }
+    if (result.status !== 0) return { labeled: false, reason: "failed", error: (result.stderr ?? "").trim() || `exit ${result.status}` }
+    return { labeled: true }
+  } catch (err) {
+    return { labeled: false, reason: "failed", error: String(err) }
+  }
+}
+
 const sender = (item: any) => {
   const from = item?.from ?? item?.sender
   return String((typeof from === "string" ? from : from?.slug ?? from?.name) ?? item?.agent?.slug ?? "")

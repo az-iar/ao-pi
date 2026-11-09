@@ -60,8 +60,10 @@ import {
   cronLine,
   fromOthers,
   inboxPrompt,
+  isBridgeDelivery,
   itemKey,
   isUnconnectedWorktree,
+  labelSessionPane,
   loadAgentPointer,
   loadCredentials,
   MAX_DISPATCHES,
@@ -574,13 +576,42 @@ export default function agentOffice(pi: ExtensionAPI) {
   let lastPollError: string | undefined
   let lastPromptAt: number | undefined
   let lastPending: Record<string, number> | undefined
-  let ownAgent: { id?: string; slug?: string } | undefined
+  let ownAgent: { id?: string; slug?: string; delivery_mode?: string } | undefined
   let lastCtx: ExtensionContext | undefined
+  // The mode the last poll read, so the bridge is logged once when it starts and
+  // once when delivery comes back, rather than on every minute's checkin.
+  let lastDeliveryMode: string | undefined
   const backlog = new Set<string>()
   const dispatching = new Set<string>()
   const assignedKeys = new Map<string, string>()
   const repo = canonical ?? directory
   const isChild = process.env.AGENT_OFFICE_CHILD === "1"
+  // Label this session's herdr terminal so a bridge wake can find it. The pane
+  // label is written in every delivery mode, because Office refuses a flip to
+  // bridge unless the agent already has a live labelled session pane. A child
+  // never labels (it would receive the agent's wakes), and no part of this can
+  // break connecting or polling: labelSessionPane returns every failure.
+  //
+  // Only a final outcome is remembered. A failed label is retried on the next
+  // poll: a timed-out hc or a restarting herdr holder must not leave a live
+  // session unlabelled for its whole life. The warning is per run of failures,
+  // so a minute-by-minute retry does not fill the log; a changed error is a new
+  // problem and is worth saying again.
+  let labeledSlug: string | undefined
+  let labelFailure: { slug: string; error?: string } | undefined
+  const labelThisSession = (slug?: string) => {
+    if (!slug || isChild || labeledSlug === slug) return
+    const result = labelSessionPane(slug)
+    if (result.reason === "failed") {
+      if (labelFailure?.slug !== slug || labelFailure.error !== result.error) {
+        warn("could not label this session's terminal", { terminal: process.env.HC_TERMINAL_ID, error: result.error })
+        labelFailure = { slug, error: result.error }
+      }
+      return
+    }
+    labeledSlug = slug
+    labelFailure = undefined
+  }
   // pi-optchat keeps one memory per profile, and the profile that belongs to this
   // folder is the Office agent the folder is connected as: pi in vinn's checkout
   // opens vinn's memory instead of asking which profile it is. Two extensions share
@@ -686,6 +717,7 @@ export default function agentOffice(pi: ExtensionAPI) {
     const me = await checkin()
     adoptAgent(me.agent?.slug)
     ownAgent = me.agent
+    labelThisSession(ownAgent?.slug)
     await connectMcp(reconnectMcp)
     await observePending(me.pending, false)
     const pending = me.pending ?? {}
@@ -974,6 +1006,17 @@ export default function agentOffice(pi: ExtensionAPI) {
       freshAssigned.length = 0
       pollPrimed = true
     }
+    // Read the delivery mode from this checkin, before any hand-off below: an
+    // agent Office flips to bridge must not wake the session even on the first
+    // poll after connecting. `bridge` is the exact value Office sends; anything
+    // else, including a missing field, keeps the plugin path unchanged.
+    const bridge = isBridgeDelivery(ownAgent)
+    const mode = ownAgent?.delivery_mode
+    if (mode !== lastDeliveryMode) {
+      if (bridge) warn("delivery mode is bridge: standing down from the inbox hand-off; the bridge wakes this session")
+      else if (lastDeliveryMode === "bridge") warn(`delivery mode is ${mode ?? "missing"}: resuming the inbox hand-off`)
+      lastDeliveryMode = mode
+    }
     if (!live || (freshMessages.length === 0 && freshTasks.length === 0 && freshAssigned.length === 0)) return
 
     for (const item of tasks) seenTasks.add(itemKey(item, "task"))
@@ -987,7 +1030,12 @@ export default function agentOffice(pi: ExtensionAPI) {
       }
     }
 
-    if (freshMessages.length > 0) {
+    if (bridge) {
+      // Local seen state only: the mail stays unread on the server because the
+      // bridge's wake is what reads it. No wake, no session prompt, no notice
+      // claim, and no mark_read.
+      for (const item of freshMessages) seenMessages.add(itemKey(item, "message"))
+    } else if (freshMessages.length > 0) {
       const ids = freshMessages.map((item) => itemKey(item, "message"))
       if (claimNotice(noticeDir(), ids)) {
         if (wake(inboxPrompt(freshMessages))) {
@@ -1013,6 +1061,7 @@ export default function agentOffice(pi: ExtensionAPI) {
       const me = await checkin()
       adoptAgent(me.agent?.slug)
       ownAgent = me.agent
+      labelThisSession(ownAgent?.slug)
       lastPollAt = Date.now()
       lastPollError = undefined
       await observePending(me.pending, true)

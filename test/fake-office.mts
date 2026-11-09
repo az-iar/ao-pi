@@ -18,6 +18,9 @@ export function fakeOffice() {
     // connected the workspace as.
     agentSlug: "pi",
     agentName: "Pi",
+    // The presence delivery_mode Office sends on checkin: poll, webhook,
+    // agent37, bridge, or undefined for a server that predates the field.
+    deliveryMode: "poll" as string | undefined,
     tokens: 0,
     openTasks: [{ id: "task-open-1", title: "Open task" }],
     unclaimedTasks: [] as any[],
@@ -94,7 +97,12 @@ export function fakeOffice() {
         if (tool === "ack_task" || tool === "accept_task") return structured({ ok: true, task_id: args.task_id })
         if (args.status) state.workStatus = args.status
         const data = {
-          agent: { slug: state.agentSlug, name: state.agentName, work_status: state.workStatus },
+          agent: {
+            slug: state.agentSlug,
+            name: state.agentName,
+            work_status: state.workStatus,
+            ...(state.deliveryMode === undefined ? {} : { delivery_mode: state.deliveryMode }),
+          },
           pending: { open_tasks: state.openTasks, unclaimed_team_tasks: state.unclaimedTasks, unread_messages: state.unreadMessages },
           rules: { etag: "etag-1", effective: [], always: [], projects: [], layers: [] },
         }

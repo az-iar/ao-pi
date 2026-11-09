@@ -50,6 +50,7 @@ function workspace() {
 }
 
 const reset = () => {
+  office.state.deliveryMode = "poll"
   office.state.openTasks = [{ id: "task-open-1", title: "Open task" }]
   office.state.unclaimedTasks = []
   office.state.unreadMessages = [
@@ -261,6 +262,68 @@ test("--dry-run reports ids only, writes nothing and starts nothing", async () =
 
   await ws.poll()
   assert.equal(ws.recorded().length, 3, "the dry run left the items new")
+})
+
+test("a bridge agent records new mail as handled, runs no inbox, and a flip to poll delivers only mail that arrived after it", async () => {
+  reset()
+  const ws = workspace()
+  await ws.poll()
+  assert.equal(ws.recorded().length, 1, "the first run handled the unread baseline")
+  office.calls.length = 0
+  const noticesBeforeBridge = readdirSync(ws.state("notices"))
+
+  office.state.deliveryMode = "bridge"
+  office.state.unreadMessages = [...office.state.unreadMessages, { id: "message-bridge", from: "azri", subject: "Bridge mail" }]
+  const bridge = await ws.poll()
+  assert.equal(bridge.code, 0, bridge.stderr)
+  assert.match(bridge.stderr, /delivery mode is bridge/)
+  assert.equal(ws.recorded().length, 1, "the bridge run started a headless inbox")
+  assert.ok(!toolCalls().includes("mark_read"), "bridge mail was marked read on the server")
+  const seen = JSON.parse(readFileSync(join(ws.state("poll"), "seen.json"), "utf8")) as { messages: string[]; deliveryMode?: string }
+  assert.ok(seen.messages.includes("message:message-bridge"), "bridge mail was not recorded as handled")
+  assert.equal(seen.deliveryMode, "bridge")
+  assert.deepEqual(readdirSync(ws.state("notices")), noticesBeforeBridge, "the bridge run claimed a notice")
+  const again = await ws.poll()
+  assert.equal(again.code, 0, again.stderr)
+  assert.doesNotMatch(again.stderr, /delivery mode is bridge/, "the bridge was logged again without a mode change")
+
+  // The bridge left the message unread on the server. Local seen state must keep
+  // it from being delivered when delivery comes back, while a new message is.
+  office.state.deliveryMode = "poll"
+  office.state.unreadMessages = [...office.state.unreadMessages, { id: "message-after-flip", from: "azri", subject: "After flip" }]
+  const flipped = await ws.poll()
+  assert.equal(flipped.code, 0, flipped.stderr)
+  assert.equal(ws.recorded().length, 2, "the post-flip message was not handed over")
+  const prompt = ws.recorded()[1].argv[3]
+  assert.match(prompt, /message:message-after-flip/)
+  assert.doesNotMatch(prompt, /message-bridge/)
+})
+
+test("task auto-dispatch still runs on bridge", async () => {
+  reset()
+  const ws = workspace()
+  await ws.poll()
+  office.calls.length = 0
+  office.state.deliveryMode = "bridge"
+  office.state.openTasks = [...office.state.openTasks, { id: "task-bridge", title: "Bridge task", status: "todo" }]
+  const result = await ws.poll()
+  assert.equal(result.code, 0, result.stderr)
+  assert.equal(ws.recorded().length, 2, "the bridge task was not dispatched")
+  assert.ok(toolCalls().includes("update_task"), "the bridge task was not claimed")
+  assert.match(ws.recorded()[1].argv[3], /^Agent Office task task-bridge\./)
+})
+
+test("a missing delivery_mode keeps the poll path unchanged", async () => {
+  reset()
+  const ws = workspace()
+  await ws.poll()
+  office.calls.length = 0
+  office.state.deliveryMode = undefined
+  office.state.unreadMessages = [...office.state.unreadMessages, { id: "message-old-server", from: "azri", subject: "From an older server" }]
+  const result = await ws.poll()
+  assert.equal(result.code, 0, result.stderr)
+  assert.equal(ws.recorded().length, 2, "a missing field stopped the inbox run")
+  assert.match(ws.recorded()[1].argv[3], /message:message-old-server/)
 })
 
 test("an overlapping run exits at once", async () => {
