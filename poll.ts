@@ -34,6 +34,7 @@ import {
   DISPATCH_STALE_MS,
   fromOthers,
   inboxPrompt,
+  isBridgeDelivery,
   itemKey,
   loadCredentials,
   releaseDispatch,
@@ -51,7 +52,7 @@ const PI_BIN = process.env.AGENT_OFFICE_PI_BIN || "pig"
 const INBOX_TIMEOUT_MS = 60 * 60_000
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url))
 
-type Seen = { messages: string[]; assigned: string[]; unclaimed: string[] }
+type Seen = { messages: string[]; assigned: string[]; unclaimed: string[]; deliveryMode?: string }
 
 const log = (line: string) => {
   process.stderr.write(`[agent-office poll] ${line}\n`)
@@ -68,7 +69,12 @@ function canonicalRoot(directory: string) {
 function loadSeen(path: string): Seen | undefined {
   try {
     const value = JSON.parse(readFileSync(path, "utf8"))
-    return { messages: list(value.messages), assigned: list(value.assigned), unclaimed: list(value.unclaimed) }
+    return {
+      messages: list(value.messages),
+      assigned: list(value.assigned),
+      unclaimed: list(value.unclaimed),
+      deliveryMode: typeof value.deliveryMode === "string" ? value.deliveryMode : undefined,
+    }
   } catch {
     return undefined
   }
@@ -211,6 +217,15 @@ async function main(): Promise<number> {
     const freshAssigned = saved ? assigned.filter((item) => !saved.assigned.includes(itemKey(item, "task"))) : []
     const freshUnclaimed = saved ? unclaimed.filter((item) => !saved.unclaimed.includes(itemKey(item, "task"))) : []
     log(`@${agent}: ${freshMessages.length} new message(s), ${freshAssigned.length} new assigned task(s), ${freshUnclaimed.length} new unclaimed task(s)${saved ? "" : " (task baseline)"}`)
+    // Office's switch, read from this run's checkin. `bridge` means the host's
+    // daemon wakes the agent's session, so the cron poller records the mail as
+    // seen locally and starts no inbox run. Task dispatch below is unchanged.
+    const bridge = isBridgeDelivery(me.agent)
+    // One log per change of mode, carried in the seen file: cron starts a new
+    // process every two minutes, so an in-memory flag would only ever be fresh.
+    const modeChanged = saved?.deliveryMode !== me.agent?.delivery_mode
+    if (bridge && modeChanged) log("delivery mode is bridge: standing down from the inbox run; new messages are recorded as handled")
+    else if (!bridge && saved?.deliveryMode === "bridge") log(`delivery mode is ${me.agent?.delivery_mode ?? "missing"}: resuming the inbox run`)
 
     // A task the cap holds back or whose dispatch failed stays unseen, so the
     // next run tries it again.
@@ -293,7 +308,17 @@ async function main(): Promise<number> {
     const handled = new Set<string>()
     if (freshMessages.length > 0) {
       const ids = freshMessages.map((item) => itemKey(item, "message"))
-      if (dryRun) {
+      if (bridge) {
+        // Local seen state only: never mark_read, because the bridge's wake is
+        // what gets the mail read. No notice claim either, so the two deliverers
+        // never contend for it.
+        if (dryRun) {
+          log(`would record message(s) ${ids.join(", ")} as handled (bridge)`)
+        } else {
+          for (const id of ids) handled.add(id)
+          log(`recorded ${ids.length} message(s) as handled (bridge)`)
+        }
+      } else if (dryRun) {
         log(`would handle message(s) ${ids.join(", ")}`)
       } else if (!claimNotice(noticeDir, ids)) {
         // Another Pi owns the batch. Leave the messages unseen: if that process
@@ -322,6 +347,7 @@ async function main(): Promise<number> {
         messages: messages.map((item) => itemKey(item, "message")).filter((id) => seenMessages.has(id) || handled.has(id)),
         assigned: assigned.map((item) => itemKey(item, "task")).filter((id) => !retry.has(id) && !failed.has(id)),
         unclaimed: unclaimed.map((item) => itemKey(item, "task")),
+        deliveryMode: me.agent?.delivery_mode,
       })
     }
   } finally {
