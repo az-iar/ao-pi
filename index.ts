@@ -591,12 +591,26 @@ export default function agentOffice(pi: ExtensionAPI) {
   // bridge unless the agent already has a live labelled session pane. A child
   // never labels (it would receive the agent's wakes), and no part of this can
   // break connecting or polling: labelSessionPane returns every failure.
+  //
+  // Only a final outcome is remembered. A failed label is retried on the next
+  // poll: a timed-out hc or a restarting herdr holder must not leave a live
+  // session unlabelled for its whole life. The warning is per run of failures,
+  // so a minute-by-minute retry does not fill the log; a changed error is a new
+  // problem and is worth saying again.
   let labeledSlug: string | undefined
+  let labelFailure: { slug: string; error?: string } | undefined
   const labelThisSession = (slug?: string) => {
     if (!slug || isChild || labeledSlug === slug) return
-    labeledSlug = slug
     const result = labelSessionPane(slug)
-    if (result.reason === "failed") warn("could not label this session's terminal", { terminal: process.env.HC_TERMINAL_ID, error: result.error })
+    if (result.reason === "failed") {
+      if (labelFailure?.slug !== slug || labelFailure.error !== result.error) {
+        warn("could not label this session's terminal", { terminal: process.env.HC_TERMINAL_ID, error: result.error })
+        labelFailure = { slug, error: result.error }
+      }
+      return
+    }
+    labeledSlug = slug
+    labelFailure = undefined
   }
   // pi-optchat keeps one memory per profile, and the profile that belongs to this
   // folder is the Office agent the folder is connected as: pi in vinn's checkout
