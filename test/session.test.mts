@@ -1,14 +1,14 @@
 import assert from "node:assert/strict"
-import { mkdirSync, mkdtempSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { test } from "node:test"
 import { fakeOffice } from "./fake-office.mts"
+import { ownsTempDir } from "./tmp.mts"
 
-test("resumed sessions restore their own agent before MCP registration", async () => {
+test("resumed sessions restore their own agent before MCP registration", async (t) => {
   const office = fakeOffice()
   const url = await office.listen()
-  const home = mkdtempSync(join(tmpdir(), "ao-sessions-"))
+  const home = ownsTempDir(t, "sessions")
   const repo = join(home, "repo")
   mkdirSync(repo)
   process.chdir(repo)

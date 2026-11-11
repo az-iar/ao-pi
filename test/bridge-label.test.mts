@@ -3,11 +3,11 @@
 // live labelled pane). Never a child, and a refused label must not break the
 // connect or the poll that made it.
 import assert from "node:assert/strict"
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { chmodSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { test } from "node:test"
 import { harness } from "./own-identity-harness.mts"
+import { ownsTempDir } from "./tmp.mts"
 
 const waitFor = async (check: () => boolean, what: string, timeoutMs = 10_000) => {
   const start = Date.now()
@@ -17,8 +17,8 @@ const waitFor = async (check: () => boolean, what: string, timeoutMs = 10_000) =
   }
 }
 
-test("the session labels its terminal on connect in every mode, never as a child, and a failed label keeps it polling", async () => {
-  const bin = mkdtempSync(join(tmpdir(), "ao-label-bin-"))
+test("the session labels its terminal on connect in every mode, never as a child, and a failed label keeps it polling", async (t) => {
+  const bin = ownsTempDir(t, "label-bin")
   const log = join(bin, "labels.jsonl")
   const hc = join(bin, "hc")
   writeFileSync(

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { test } from "node:test"
 import { fakeOffice } from "./fake-office.mts"
+import { ownsTempDir } from "./tmp.mts"
 
 // Never open a real browser from a test: the opener is the one boundary that
 // reaches outside this process (az-iar/ao-pi#10).
@@ -18,13 +18,13 @@ async function waitFor(check: () => boolean, timeoutMs = 5_000) {
   }
 }
 
-test("approving as a new agent does not overwrite the previous agent's token", async () => {
+test("approving as a new agent does not overwrite the previous agent's token", async (t) => {
   const office = fakeOffice()
   office.state.unreadMessages = []
   office.state.openTasks = []
   office.state.unclaimedTasks = []
   const url = await office.listen()
-  const home = mkdtempSync(join(tmpdir(), "ao-approval-"))
+  const home = ownsTempDir(t, "approval")
   const workspace = join(home, "repo")
   const config = join(home, ".config", "agent-office", "pi")
   const agents = join(config, "agents")

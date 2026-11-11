@@ -2,16 +2,16 @@
 // a commit writes, and nothing else.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { sandboxArgs, workerSandboxPaths } from "../lib/office.ts";
+import { ownsTempDir, tempDir } from "./tmp.mts";
 
 // Real directories, because only existing paths are bound (a missing bind source
 // makes bwrap refuse to start, which is the second bug neo found).
-const fixture = mkdtempSync(join(tmpdir(), "ao-argv-"));
+const fixture = tempDir("argv");
 const paths = {
   worktree: join(fixture, "tree"),
   gitDir: join(fixture, "tree", ".git"),
@@ -45,8 +45,8 @@ function bwrapAvailable(): string | undefined {
 }
 const unavailable = bwrapAvailable();
 
-test("a write outside the worktree fails, and a commit inside it still works", { skip: unavailable }, () => {
-  const root = mkdtempSync(join(tmpdir(), "ao-sbx-"));
+test("a write outside the worktree fails, and a commit inside it still works", { skip: unavailable }, (t) => {
+  const root = ownsTempDir(t, "sbx");
   const repo = join(root, "repo");
   const bare = join(root, "bare.git");
   mkdirSync(repo);
@@ -67,7 +67,7 @@ test("a write outside the worktree fails, and a commit inside it still works", {
   // bug is what the first run reported).
   const piState = join(root, "pi-state")
   mkdirSync(piState)
-  const elsewhere = mkdtempSync(join(tmpdir(), "ao-outside-"))
+  const elsewhere = ownsTempDir(t, "outside")
   const outside = join(elsewhere, "escape.txt");
   const script = [
     `echo nope > ${outside} 2>&1 || echo OUTSIDE_REFUSED`,
@@ -83,11 +83,11 @@ test("a write outside the worktree fails, and a commit inside it still works", {
   assert.match(out, /PUSH_OK/, out);
 });
 
-test("workerSandboxPaths points at the real common dir of a linked worktree", () => {
+test("workerSandboxPaths points at the real common dir of a linked worktree", (t) => {
   // The bug this pins: gitCommonDir answers an absolute path, and joining it onto
   // the worktree produced <worktree>/<abs>/.git, which bwrap then refused as a
   // missing bind source - every dispatch failed with the flag on (neo, ao-pi#22).
-  const root = mkdtempSync(join(tmpdir(), "ao-paths-"));
+  const root = ownsTempDir(t, "paths");
   const repo = join(root, "repo");
   mkdirSync(repo);
   spawnSync("git", ["-C", repo, "init", "-q"]);

@@ -5,13 +5,13 @@
 import assert from "node:assert/strict"
 import { mkdirSync, readFileSync, realpathSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
-import { mkdtempSync } from "node:fs"
-import { homedir, tmpdir } from "node:os"
+import { homedir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
 import { acquireWorkScope, DISPATCH_STALE_MS, releaseWorkScope, sandboxArgs, sandboxAvailable, sandboxDecision, stillDispatchable, unclaimTask, workScopeKey, workerSandboxPaths } from "../lib/office.ts"
+import { ownsTempDir, tempDir } from "./tmp.mts"
 
-const lockDir = () => join(mkdtempSync(join(tmpdir(), "ao-scope-")), "locks")
+const lockDir = () => join(tempDir("scope"), "locks")
 
 test("a task that stopped being todo is not dispatched", () => {
   // The predicate has existed since agent-office#540 with a test of its own; what
@@ -120,8 +120,8 @@ test("the sandbox refusal comes before the claim and the worktree", () => {
 // The other half: default-on must not break a worker's token refresh. The
 // credentials file is written beside itself (temp file plus rename), so the
 // directory has to be a writable bind inside the sandbox.
-test("the sandbox makes the worker's credentials directory writable", () => {
-  const root = mkdtempSync(join(tmpdir(), "ao-cred-bind-"))
+test("the sandbox makes the worker's credentials directory writable", (t) => {
+  const root = ownsTempDir(t, "cred-bind")
   const agents = join(root, "agents")
   mkdirSync(agents, { recursive: true })
   const worktree = join(root, "worktree")
@@ -139,8 +139,8 @@ test("the sandbox makes the worker's credentials directory writable", () => {
 
 // And the claim above, for real: a sandboxed process writes the credentials file
 // where the worker would, and is refused outside its mounts.
-test("a real sandboxed write to the credentials directory succeeds, and outside it does not", { skip: !sandboxAvailable() }, () => {
-  const root = mkdtempSync(join(tmpdir(), "ao-sandbox-run-"))
+test("a real sandboxed write to the credentials directory succeeds, and outside it does not", { skip: !sandboxAvailable() }, (t) => {
+  const root = ownsTempDir(t, "sandbox-run")
   const agents = join(root, "agents")
   const outside = join(root, "outside")
   mkdirSync(agents, { recursive: true })

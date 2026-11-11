@@ -15,12 +15,12 @@
 // xdg-open stub on PATH, and AGENT_OFFICE_PI_BIN is a stub script on disk.
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
-import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { after, before, test } from "node:test"
 import { type Call, fakeOffice } from "./fake-office.mts"
+import { tempDir } from "./tmp.mts"
 
 // index.ts resolves the repo root from `require`, which Pi's loader provides and
 // plain node ESM does not (see worktree.test.mts).
@@ -36,7 +36,7 @@ after(() => office.close())
 // directory name (agent-office#540).
 const FIXTURE_REPO = "az-iar/fixture-repo"
 
-const root = mkdtempSync(join(tmpdir(), "ao-dispatch-behaviour-"))
+const root = tempDir("dispatch-behaviour")
 const home = join(root, "home")
 const store = join(root, "store")
 const bin = join(root, "bin")

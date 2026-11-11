@@ -1,12 +1,12 @@
 import assert from "node:assert/strict"
 import { execFileSync, spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
-import { after, before, test } from "node:test"
+import { after, before, test, type TestContext } from "node:test"
 import { fileURLToPath } from "node:url"
 import { fakeOffice } from "./fake-office.mts"
+import { ownsTempDir } from "./tmp.mts"
 
 const office = fakeOffice()
 const pollScript = fileURLToPath(new URL("../poll.ts", import.meta.url))
@@ -19,9 +19,11 @@ before(async () => {
 after(() => office.close())
 
 // A git workspace with its own credentials, claim and state directories, and a
-// `pig` stub that records each run's cwd and argv as JSON.
-function workspace() {
-  const root = mkdtempSync(join(tmpdir(), "ao-poll-"))
+// `pig` stub that records each run's cwd and argv as JSON. The directory belongs
+// to the test that asks for it, so its fixtures are gone when that test ends
+// (assertion or not) rather than accumulating for the length of the file.
+function workspace(t: TestContext) {
+  const root = ownsTempDir(t, "poll")
   const dir = join(root, "repo")
   const runs = join(root, "runs")
   mkdirSync(dir)
@@ -61,9 +63,9 @@ const reset = () => {
 }
 const toolCalls = () => office.calls.filter((c) => c.path === "/mcp").map((c) => c.body.params.name)
 
-test("session selection pins poll and child, and unknown sessions fail closed", async () => {
+test("session selection pins poll and child, and unknown sessions fail closed", async (t) => {
   reset()
-  const ws = workspace()
+  const ws = workspace(t)
   const config = join(ws.root, ".config", "agent-office", "pi")
   const sessions = join(dirname(config), "sessions")
   const agents = join(config, "agents")
@@ -89,9 +91,9 @@ test("session selection pins poll and child, and unknown sessions fail closed", 
 // every pre-upgrade session's unattended poll until someone resumed it in Pi
 // (bruno on ao-pi#42). The legacy file is retired with the copy: without that,
 // deleting the shared record no longer revokes the session's identity.
-test("a session approved before the move still polls once, its legacy record copied forward", async () => {
+test("a session approved before the move still polls once, its legacy record copied forward", async (t) => {
   reset()
-  const ws = workspace()
+  const ws = workspace(t)
   const config = join(ws.root, ".config", "agent-office", "pi")
   const legacy = join(config, "sessions")
   const shared = join(ws.root, ".config", "agent-office", "sessions")
@@ -112,17 +114,17 @@ test("a session approved before the move still polls once, its legacy record cop
   assert.equal(existsSync(join(shared, `${key}.json`)), true, "the shared record is written")
 })
 
-test("not connected: a hint and a non-zero exit", async () => {
-  const ws = workspace()
+test("not connected: a hint and a non-zero exit", async (t) => {
+  const ws = workspace(t)
   const result = await ws.poll([], { AGENT_OFFICE_PI_CREDENTIALS: join(ws.dir, "missing.json") })
   assert.notEqual(result.code, 0)
   assert.match(result.stderr, /run \/office in Pi first/)
   assert.deepEqual(ws.recorded(), [])
 })
 
-test("first run handles unread mail but baselines tasks; a new message runs exactly once", async () => {
+test("first run handles unread mail but baselines tasks; a new message runs exactly once", async (t) => {
   reset()
-  const ws = workspace()
+  const ws = workspace(t)
   const first = await ws.poll()
   assert.equal(first.code, 0, first.stderr)
   assert.equal(ws.recorded().length, 1)
@@ -149,9 +151,9 @@ test("first run handles unread mail but baselines tasks; a new message runs exac
   assert.ok(!third.stderr.includes("New work"), "no Office text in the log")
 })
 
-test("a failed run releases the claim and retries next time", async () => {
+test("a failed run releases the claim and retries next time", async (t) => {
   reset()
-  const ws = workspace()
+  const ws = workspace(t)
   const failed = await ws.poll([], { STUB_EXIT: "1" })
   assert.match(failed.stderr, /inbox run failed/)
   assert.deepEqual(readdirSync(ws.state("notices")), [])
@@ -159,9 +161,9 @@ test("a failed run releases the claim and retries next time", async () => {
   assert.equal(ws.recorded().length, 2)
 })
 
-test("a notice claim held elsewhere prevents a run", async () => {
+test("a notice claim held elsewhere prevents a run", async (t) => {
   reset()
-  const ws = workspace()
+  const ws = workspace(t)
   await ws.poll()
   const { claimNotice, releaseNotice } = await import("../lib/office.ts")
   assert.ok(claimNotice(ws.state("notices"), ["message:message-held"]))
@@ -177,9 +179,9 @@ test("a notice claim held elsewhere prevents a run", async () => {
   assert.equal(ws.recorded().length, 2, "a failed claim is retried after the claim is released")
 })
 
-test("a new todo task is claimed, run as a worker in its worktree, and its dispatch lock released", async () => {
+test("a new todo task is claimed, run as a worker in its worktree, and its dispatch lock released", async (t) => {
   reset()
-  const ws = workspace()
+  const ws = workspace(t)
   await ws.poll()
   office.calls.length = 0
   office.state.openTasks = [...office.state.openTasks, { id: "task-off", title: "Not now", status: "todo" }]
@@ -207,9 +209,9 @@ test("a new todo task is claimed, run as a worker in its worktree, and its dispa
   assert.deepEqual(readdirSync(ws.state("dispatch")), [])
 })
 
-test("a failed dispatch stays unseen and retries after the obstruction is gone", async () => {
+test("a failed dispatch stays unseen and retries after the obstruction is gone", async (t) => {
   reset()
-  const ws = workspace()
+  const ws = workspace(t)
   await ws.poll()
   office.calls.length = 0
   office.state.openTasks = [...office.state.openTasks, { id: "task-retry", title: "Retry me", status: "todo" }]
@@ -228,9 +230,9 @@ test("a failed dispatch stays unseen and retries after the obstruction is gone",
   assert.equal(ws.recorded()[1].cwd, worktree)
 })
 
-test("a missing worker binary stays unseen and retries", async () => {
+test("a missing worker binary stays unseen and retries", async (t) => {
   reset()
-  const ws = workspace()
+  const ws = workspace(t)
   await ws.poll()
   office.calls.length = 0
   office.state.openTasks = [...office.state.openTasks, { id: "task-no-bin", title: "No binary", status: "todo" }]
@@ -244,9 +246,9 @@ test("a missing worker binary stays unseen and retries", async () => {
   assert.equal(ws.recorded().length, 2, "the task was not marked seen")
 })
 
-test("--dry-run reports ids only, writes nothing and starts nothing", async () => {
+test("--dry-run reports ids only, writes nothing and starts nothing", async (t) => {
   reset()
-  const ws = workspace()
+  const ws = workspace(t)
   await ws.poll()
   office.calls.length = 0
   office.state.unreadMessages = [...office.state.unreadMessages, { id: "message-dry", from: "azri", subject: "Secret subject" }]
@@ -264,9 +266,9 @@ test("--dry-run reports ids only, writes nothing and starts nothing", async () =
   assert.equal(ws.recorded().length, 3, "the dry run left the items new")
 })
 
-test("a bridge agent records new mail as handled, runs no inbox, and a flip to poll delivers only mail that arrived after it", async () => {
+test("a bridge agent records new mail as handled, runs no inbox, and a flip to poll delivers only mail that arrived after it", async (t) => {
   reset()
-  const ws = workspace()
+  const ws = workspace(t)
   await ws.poll()
   assert.equal(ws.recorded().length, 1, "the first run handled the unread baseline")
   office.calls.length = 0
@@ -299,9 +301,9 @@ test("a bridge agent records new mail as handled, runs no inbox, and a flip to p
   assert.doesNotMatch(prompt, /message-bridge/)
 })
 
-test("task auto-dispatch still runs on bridge", async () => {
+test("task auto-dispatch still runs on bridge", async (t) => {
   reset()
-  const ws = workspace()
+  const ws = workspace(t)
   await ws.poll()
   office.calls.length = 0
   office.state.deliveryMode = "bridge"
@@ -313,9 +315,9 @@ test("task auto-dispatch still runs on bridge", async () => {
   assert.match(ws.recorded()[1].argv[3], /^Agent Office task task-bridge\./)
 })
 
-test("a missing delivery_mode keeps the poll path unchanged", async () => {
+test("a missing delivery_mode keeps the poll path unchanged", async (t) => {
   reset()
-  const ws = workspace()
+  const ws = workspace(t)
   await ws.poll()
   office.calls.length = 0
   office.state.deliveryMode = undefined
@@ -326,9 +328,9 @@ test("a missing delivery_mode keeps the poll path unchanged", async () => {
   assert.match(ws.recorded()[1].argv[3], /message:message-old-server/)
 })
 
-test("an overlapping run exits at once", async () => {
+test("an overlapping run exits at once", async (t) => {
   reset()
-  const ws = workspace()
+  const ws = workspace(t)
   mkdirSync(ws.state("poll"), { recursive: true })
   writeFileSync(join(ws.state("poll"), "run.lock"), JSON.stringify({ pid: process.pid, created: Date.now() }))
   const result = await ws.poll()

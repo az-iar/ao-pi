@@ -1,11 +1,11 @@
 // Shared by the own-identity tests. Each test file imports index.ts and lib/office.ts
 // once per process, and those read HOME and AGENT_OFFICE_URL at import time, so every
 // scenario lives in its own file and calls harness() exactly once.
-import { mkdirSync, mkdtempSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { after } from "node:test"
 import { fakeOffice } from "./fake-office.mts"
+import { tempDir } from "./tmp.mts"
 
 // Shared harness for the cases below: a fresh HOME, a fake office, an extension
 // instance whose tools and MCP registrations are visible.
@@ -24,7 +24,7 @@ export async function harness(env: Record<string, string | undefined>) {
   // file used to keep the fake office's listener open (ao-pi#45). Callers that
   // close it themselves are unaffected: close() is safe to call twice.
   after(() => office.close())
-  const home = mkdtempSync(join(tmpdir(), "ao-own-identity-"))
+  const home = tempDir("own-identity")
   const repo = join(home, "repo")
   mkdirSync(repo)
   process.chdir(repo)

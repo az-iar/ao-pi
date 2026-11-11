@@ -4,15 +4,15 @@
 // approval of its own, and therefore no Office tools at all.
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { mkdirSync, mkdtempSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { fakeOffice } from "./fake-office.mts"
+import { ownsTempDir } from "./tmp.mts"
 
-test("a child session with no approval of its own cannot speak as its host", async () => {
+test("a child session with no approval of its own cannot speak as its host", async (t) => {
   const office = fakeOffice()
   const url = await office.listen()
-  const home = mkdtempSync(join(tmpdir(), "ao-child-identity-"))
+  const home = ownsTempDir(t, "child-identity")
   const repo = join(home, "repo")
   mkdirSync(repo)
   process.chdir(repo)

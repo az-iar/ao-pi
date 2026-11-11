@@ -2,11 +2,11 @@ import assert from "node:assert/strict"
 import { execFileSync, spawn, spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
-import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, test, type TestContext } from "node:test"
 import { fileURLToPath } from "node:url"
 import { fakeOffice } from "./fake-office.mts"
+import { tempDir } from "./tmp.mts"
 
 // Never open a real browser from a test: the opener is the one boundary that
 // reaches outside this process (az-iar/ao-pi#10).
@@ -31,8 +31,10 @@ const url = await office.listen()
 // exits is a hang, not a pass.
 after(() => office.close())
 
-// lib/office.ts resolves ~/.config/agent-office from HOME when it loads.
-const home = mkdtempSync(join(tmpdir(), "ao-worktree-"))
+// lib/office.ts resolves ~/.config/agent-office from HOME when it loads. The
+// whole file shares this one home, so it is removed by test/tmp.mts's after hook
+// at the end of the file, after the tests and their own session shutdowns.
+const home = tempDir("worktree")
 
 // The extension opens each approval link in a browser. In a test nobody clicks
 // it, and on a shared machine a real browser would sit holding CPU long after

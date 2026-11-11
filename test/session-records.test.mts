@@ -3,12 +3,12 @@
 // identity. HOME is its own: the directory is host-wide, and a shared HOME would
 // let these read what another test wrote.
 import assert from "node:assert/strict"
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { test } from "node:test"
+import { tempDir } from "./tmp.mts"
 
-process.env.HOME = mkdtempSync(join(tmpdir(), "ao-pi-sessions-"))
+process.env.HOME = tempDir("pi-sessions")
 const { legacySessionPointerPath, refusedSessionPairCount, saveSessionAgent, sessionAgentOf, sessionPointerPath } = await import("../lib/office.ts")
 
 // A root process ignores the permission bits, so the read-only test would pass

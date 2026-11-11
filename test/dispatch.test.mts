@@ -1,12 +1,12 @@
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdirSync, mkdtempSync, readdirSync, utimesSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { mkdirSync, readdirSync, utimesSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { test } from "node:test"
 import { fileURLToPath } from "node:url"
 import { acquireDispatch, DISPATCH_STALE_MS, MAX_DISPATCHES, releaseDispatch } from "../lib/office.ts"
+import { ownsTempDir } from "./tmp.mts"
 
 const childScript = fileURLToPath(new URL("./acquire-child.mts", import.meta.url))
 const lockName = (id: string) => `${createHash("sha256").update(id).digest("hex").slice(0, 16)}.lock`
@@ -25,8 +25,8 @@ function race(dir: string, id: string, at: number): Promise<string> {
   })
 }
 
-test("the dispatch cap holds across processes", async () => {
-  const dir = join(mkdtempSync(join(tmpdir(), "ao-dispatch-")), "locks")
+test("the dispatch cap holds across processes", async (t) => {
+  const dir = join(ownsTempDir(t, "dispatch"), "locks")
   const at = Date.now() + 1_500
   const results = await Promise.all(Array.from({ length: 12 }, (_, index) => race(dir, `task-${index}`, at)))
   const started = results.filter((result) => result === "ok").length
@@ -36,8 +36,8 @@ test("the dispatch cap holds across processes", async () => {
   assert.equal(readdirSync(dir).includes(".acquire"), false, "the mutex is released")
 })
 
-test("a stale lock for the same task is reclaimed", () => {
-  const dir = join(mkdtempSync(join(tmpdir(), "ao-lock-")), "locks")
+test("a stale lock for the same task is reclaimed", (t) => {
+  const dir = join(ownsTempDir(t, "lock"), "locks")
   const id = "task-stale"
   const lock = join(dir, lockName(id))
   mkdirSync(dir, { recursive: true })
@@ -49,8 +49,8 @@ test("a stale lock for the same task is reclaimed", () => {
   assert.deepEqual(readdirSync(dir).filter((file) => file.endsWith(".lock")), [])
 })
 
-test("a fresh lock for the same task stays busy", () => {
-  const dir = join(mkdtempSync(join(tmpdir(), "ao-lock-")), "locks")
+test("a fresh lock for the same task stays busy", (t) => {
+  const dir = join(ownsTempDir(t, "lock"), "locks")
   const id = "task-fresh"
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, lockName(id)), JSON.stringify({ task: id, pid: process.pid, created: Date.now() }))
@@ -75,12 +75,9 @@ test("a task that stopped being todo is not dispatched", async () => {
 // agent-office#540: two agents can be handed the same task. Without the owner
 // in the name they compute the same worktree path and branch, and the second
 // one resumes the first one's tree.
-test("two agents given the same task get different worktrees", async () => {
-  const { mkdtempSync } = await import("node:fs")
-  const { tmpdir } = await import("node:os")
-  const { join } = await import("node:path")
+test("two agents given the same task get different worktrees", async (t) => {
   const { addWorktree, worktreeSlug } = await import("../lib/office.ts")
-  const repo = join(mkdtempSync(join(tmpdir(), "ao-wt-")), "ao-pi")
+  const repo = join(ownsTempDir(t, "wt"), "ao-pi")
   const { spawnSync } = await import("node:child_process")
   spawnSync("git", ["init", "-q", "-b", "main", repo])
   // A branch to hang a worktree off: git will not add one to an empty repo.

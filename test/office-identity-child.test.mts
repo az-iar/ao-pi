@@ -3,19 +3,19 @@
 // child only reaches an Office identity through the dispatcher's override, so
 // the variable has to be in the environment before the extension loads.
 import assert from "node:assert/strict"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { test } from "node:test"
 
 import { fakeOffice } from "./fake-office.mts"
+import { ownsTempDir, tempDir } from "./tmp.mts"
 
 const office = fakeOffice()
 office.state.unreadMessages = []
 office.state.openTasks = []
 office.state.unclaimedTasks = []
 const url = await office.listen()
-const home = mkdtempSync(join(tmpdir(), "ao-child-via-"))
+const home = tempDir("child-via")
 const repo = join(home, "repo")
 mkdirSync(repo)
 process.chdir(repo)
@@ -68,11 +68,11 @@ test("a child names itself and its parent, normalised the way the office accepts
   await office.close()
 })
 
-test("a child with no parent pointer sends no via at all", async () => {
+test("a child with no parent pointer sends no via at all", async (t) => {
   // A second terminal-shaped session with the directory pointer gone: a child
   // with no parent to name must not hand-build a partial header, because the
   // office refuses one that is missing a key.
-  const other = mkdtempSync(join(tmpdir(), "ao-child-via-none-"))
+  const other = ownsTempDir(t, "child-via-none")
   mkdirSync(join(other, "repo"))
   process.chdir(join(other, "repo"))
   const session = await boot("child-session-2")

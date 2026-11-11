@@ -3,11 +3,11 @@
 // Only a final outcome (labelled, missing hc, no terminal) stops the retry, and a
 // run of failures warns once until the error text changes.
 import assert from "node:assert/strict"
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { chmodSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { test } from "node:test"
 import { harness } from "./own-identity-harness.mts"
+import { ownsTempDir } from "./tmp.mts"
 
 const waitFor = async (check: () => boolean, what: string, timeoutMs = 10_000) => {
   const start = Date.now()
@@ -19,8 +19,8 @@ const waitFor = async (check: () => boolean, what: string, timeoutMs = 10_000) =
 
 type Attempt = { argv: string[]; ok: boolean }
 
-test("a transient label failure is retried until it succeeds, with one warning", async () => {
-  const bin = mkdtempSync(join(tmpdir(), "ao-label-retry-"))
+test("a transient label failure is retried until it succeeds, with one warning", async (t) => {
+  const bin = ownsTempDir(t, "label-retry")
   const log = join(bin, "attempts.jsonl")
   const counter = join(bin, "count")
   const hc = join(bin, "hc")
