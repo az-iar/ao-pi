@@ -3,13 +3,13 @@
 // repo ran in a worktree of the wrong one.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { chooseRepo, repoFromRemote, resolveDispatchRepo, siblingCheckouts } from "../lib/office.ts";
+import { ownsTempDir } from "./tmp.mts";
 
 test("a checkout is matched by its remote, not its directory name", () => {
   assert.equal(repoFromRemote("https://github.com/az-iar/agent-office.git"), "az-iar/agent-office");
@@ -75,11 +75,11 @@ test("a task naming no repo keeps the session's", () => {
   assert.deepEqual(resolveDispatchRepo("/work/ao-pi", "", () => []), { path: "/work/ao-pi" });
 });
 
-test("a real git worktree beside its repository is not a second checkout", () => {
+test("a real git worktree beside its repository is not a second checkout", (t) => {
   // Built with real `git worktree add`, not two clones: a worktree shares its
   // origin *and* its git common dir, which is the case that made the first
   // version refuse every dispatch (neo, ao-pi#17 review).
-  const root = mkdtempSync(join(tmpdir(), "ao-dispatch-"))
+  const root = ownsTempDir(t, "repo-choice")
   const repo = join(root, "agent-office")
   mkdirSync(repo);
   spawnSync("git", ["-C", repo, "init", "-q"]);

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict"
-import { mkdirSync, mkdtempSync } from "node:fs"
+import { mkdirSync } from "node:fs"
 import { execFileSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
-import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
+import { tempDir } from "./tmp.mts"
 
 // lib/office.ts resolves ~/.config/agent-office from HOME when it loads.
-const home = mkdtempSync(join(tmpdir(), "ao-home-"))
+const home = tempDir("home")
 process.env.HOME = home
 const { agentCredentialsPath, resolveCredentials, saveAgentPointers, saveAgentPointer, sessionPointerPath, loadAgentPointer, saveCredentials, cronLine } = await import("../lib/office.ts")
 

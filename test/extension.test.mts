@@ -1,9 +1,9 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { test } from "node:test"
 import { fakeOffice } from "./fake-office.mts"
+import { ownsTempDir } from "./tmp.mts"
 
 // Never open a real browser from a test: the opener is the one boundary that
 // reaches outside this process (az-iar/ao-pi#10).
@@ -17,13 +17,13 @@ async function waitFor(check: () => boolean, timeoutMs = 2_000) {
   }
 }
 
-test("the extension registers the office MCP server and schedules its refresh", async () => {
+test("the extension registers the office MCP server and schedules its refresh", async (t) => {
   const office = fakeOffice()
   office.state.unreadMessages = []
   office.state.openTasks = []
   office.state.unclaimedTasks = []
   const url = await office.listen()
-  const home = mkdtempSync(join(tmpdir(), "ao-extension-"))
+  const home = ownsTempDir(t, "extension")
   const workspace = join(home, "repo")
   mkdirSync(workspace)
   process.chdir(workspace)

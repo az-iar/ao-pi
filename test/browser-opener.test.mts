@@ -1,25 +1,30 @@
 import assert from "node:assert/strict"
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { test } from "node:test"
+import { test, type TestContext } from "node:test"
 
 import { browserOpeningAllowed, openBrowser } from "../index.ts"
+import { ownsTempDir } from "./tmp.mts"
 
 // az-iar/ao-pi#10: the approval flow shells out to xdg-open, so a suite run used to
 // launch a real browser - hundreds of stray firefox processes on the host after a
-// few runs. The guard is read at the boundary, and these tests are what keep it
-// honest: a fake xdg-open on PATH records any launch, so the first case fails if a
-// real one is attempted, and the second proves the recorder works so the first
-// cannot pass by never being reached.
+// few runs. The switch is read at the boundary, and these tests are what keep it
+// honest: a fake xdg-open on PATH records any launch, so the guard case fails if a
+// real one is attempted, and the recorder case proves the recorder works so the
+// guard cannot pass by never being reached.
+//
+// The switch is set once for the whole suite by package.json's test script
+// (AGENT_OFFICE_OPEN_BROWSER=off), so a test that never touches it cannot open a
+// browser either. The first case below proves that, since it is the one case that
+// leaves the environment alone.
 //
 // They call openBrowser directly rather than running an approval: the flow spawns
 // detached processes and holds a callback server, which is how the previous attempt
 // at this test hung for its whole timeout instead of asserting anything.
 
 // A PATH entry whose xdg-open records that it ran, instead of opening anything.
-function fakeOpener(): { dir: string; marker: string } {
-  const dir = mkdtempSync(join(tmpdir(), "ao-opener-bin-"))
+function fakeOpener(t: TestContext): { dir: string; marker: string } {
+  const dir = ownsTempDir(t, "opener-bin")
   const marker = join(dir, "launched")
   writeFileSync(join(dir, "xdg-open"), `#!/bin/sh\necho "$1" >> ${marker}\n`)
   chmodSync(join(dir, "xdg-open"), 0o755)
@@ -39,8 +44,19 @@ async function withOpener<T>(opener: { dir: string }, fn: () => Promise<T>): Pro
 // The opener spawns detached, so give it a moment to write its marker.
 const settle = () => new Promise((resolve) => setTimeout(resolve, 300))
 
-test("a switched-off opener launches nothing, even when xdg-open is on PATH", async () => {
-  const opener = fakeOpener()
+test("the environment the test process starts with launches nothing", async (t) => {
+  // No assignment to AGENT_OFFICE_OPEN_BROWSER here: this is the state another
+  // test file (an approval, a dispatch) inherits, and it must already be safe.
+  const opener = fakeOpener(t)
+  assert.equal(process.env.AGENT_OFFICE_OPEN_BROWSER, "off", "the test script must switch the opener off for the whole process")
+  assert.equal(browserOpeningAllowed(), false)
+  await withOpener(opener, async () => openBrowser("https://office.example/approve?untouched=1"))
+  await settle()
+  assert.equal(existsSync(opener.marker), false, "a real browser was opened from a test process that never touched the switch")
+})
+
+test("a switched-off opener launches nothing, even when xdg-open is on PATH", async (t) => {
+  const opener = fakeOpener(t)
   const saved = process.env.AGENT_OFFICE_OPEN_BROWSER
   process.env.AGENT_OFFICE_OPEN_BROWSER = "off"
   try {
@@ -54,8 +70,8 @@ test("a switched-off opener launches nothing, even when xdg-open is on PATH", as
   assert.equal(existsSync(opener.marker), false, "a real opener was attempted while switched off")
 })
 
-test("the recorder works when the opener is allowed, so the test above cannot pass by never being reached", async () => {
-  const opener = fakeOpener()
+test("the recorder works when the opener is allowed, so the test above cannot pass by never being reached", async (t) => {
+  const opener = fakeOpener(t)
   const saved = process.env.AGENT_OFFICE_OPEN_BROWSER
   delete process.env.AGENT_OFFICE_OPEN_BROWSER
   try {
@@ -70,13 +86,18 @@ test("the recorder works when the opener is allowed, so the test above cannot pa
 })
 
 test("the switch understands the spellings a runner might use", () => {
-  for (const off of ["off", "OFF", "0", "false", "no", " off "]) {
-    process.env.AGENT_OFFICE_OPEN_BROWSER = off
-    assert.equal(browserOpeningAllowed(), false, `${JSON.stringify(off)} should disable the opener`)
+  const saved = process.env.AGENT_OFFICE_OPEN_BROWSER
+  try {
+    for (const off of ["off", "OFF", "0", "false", "no", " off "]) {
+      process.env.AGENT_OFFICE_OPEN_BROWSER = off
+      assert.equal(browserOpeningAllowed(), false, `${JSON.stringify(off)} should disable the opener`)
+    }
+    for (const on of ["", "on", "1", "true"]) {
+      process.env.AGENT_OFFICE_OPEN_BROWSER = on
+      assert.equal(browserOpeningAllowed(), true, `${JSON.stringify(on)} should leave it enabled`)
+    }
+  } finally {
+    if (saved === undefined) delete process.env.AGENT_OFFICE_OPEN_BROWSER
+    else process.env.AGENT_OFFICE_OPEN_BROWSER = saved
   }
-  for (const on of ["", "on", "1", "true"]) {
-    process.env.AGENT_OFFICE_OPEN_BROWSER = on
-    assert.equal(browserOpeningAllowed(), true, `${JSON.stringify(on)} should leave it enabled`)
-  }
-  delete process.env.AGENT_OFFICE_OPEN_BROWSER
 })
