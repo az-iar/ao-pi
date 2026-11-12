@@ -36,6 +36,13 @@ export function fakeOffice() {
     tokenDrops: 0,
     openTasks: [{ id: "task-open-1", title: "Open task" }],
     unclaimedTasks: [] as any[],
+    // The spend rows a worker's report_usage stored, one per idempotency key, the
+    // way Office stores them (agent-office#843): a repeat with the key already
+    // there answers 200 and stores nothing.
+    usageEvents: [] as any[],
+    // How many upcoming report_usage calls a gateway refuses with a 500: the
+    // transient failure a retry has to survive without counting twice.
+    usageFailures: 0,
     // What get_task answers, per task id. A dispatch re-reads the task before it
     // claims it, so a test can show the poller's snapshot and the current task
     // disagreeing (a task cancelled between the two). Absent, get_task falls back
@@ -111,6 +118,19 @@ export function fakeOffice() {
         const tool = String(body.params?.name ?? "")
         const args = body.params?.arguments ?? {}
         const structured = (value: unknown) => result({ content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value })
+        if (tool === "report_usage") {
+          if (state.usageFailures > 0) {
+            state.usageFailures--
+            res.writeHead(500, { "Content-Type": "application/json" })
+            return res.end(JSON.stringify({ error: "gateway" }))
+          }
+          const key = String(args.idempotency_key ?? "")
+          const stored = state.usageEvents.find((event: any) => event.idempotency_key === key)
+          if (stored) return structured({ event: stored, created: false })
+          const event = { ...args, id: `usage-${state.usageEvents.length + 1}` }
+          state.usageEvents.push(event)
+          return structured({ event, created: true })
+        }
         // The task tools a dispatch drives: get_task answers the current state,
         // and update_task moves it, so a second read agrees with the write.
         if (tool === "get_task") {

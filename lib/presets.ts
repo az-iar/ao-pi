@@ -85,3 +85,33 @@ export function presetFlags(preset: unknown, tiers: PresetTiers = loadPresetTier
 export function workerPresetFlags(task: any, tiers: PresetTiers = loadPresetTiers()): string[] {
   return presetFlags(task?.preset, tiers)
 }
+
+export type PresetArgs = { flags: string[]; ran?: { model: string; thinking: string } }
+
+// ranTiers is which tiers of the task's preset actually reached the worker: a
+// tier the config does not map is left off the command line, so the worker ran
+// Pi's own default for that axis and reporting it as the task's preset would be
+// a claim about what ran that is not true. Both tiers or none (agent-office#841).
+function ranTiers(preset: unknown, tiers: PresetTiers): { model: string; thinking: string } | undefined {
+  if (!preset || typeof preset !== "object" || Array.isArray(preset)) return undefined
+  const { model, thinking } = preset as { model?: unknown; thinking?: unknown }
+  const applied = (tier: unknown, map: Record<string, string>) => {
+    const name = typeof tier === "string" ? tier.trim() : ""
+    return name && Object.hasOwn(map, name) && map[name] ? name : ""
+  }
+  const ranModel = applied(model, tiers.model)
+  const ranThinking = applied(thinking, tiers.thinking)
+  return ranModel && ranThinking ? { model: ranModel, thinking: ranThinking } : undefined
+}
+
+// presetArgs is one dispatch's flags plus the tiers they came from, from one read
+// of the mapping: the worker's argv and the `preset_ran` it reports later (Office
+// 1b8f755a) must never disagree about which preset ran.
+export function presetArgs(preset: unknown, tiers: PresetTiers = loadPresetTiers()): PresetArgs {
+  return { flags: presetFlags(preset, tiers), ran: ranTiers(preset, tiers) }
+}
+
+// workerPresetArgs is presetArgs for the task read a dispatch holds.
+export function workerPresetArgs(task: any, tiers: PresetTiers = loadPresetTiers()): PresetArgs {
+  return presetArgs(task?.preset, tiers)
+}

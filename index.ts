@@ -47,7 +47,8 @@ import { basename, dirname, join, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { type SessionChoice, message as sessionMessage, pickSession } from "./lib/sessions.ts"
 import { watchTask } from "./lib/task-watch.ts"
-import { workerPresetFlags } from "./lib/presets.ts"
+import { workerPresetArgs } from "./lib/presets.ts"
+import { dayOf, presetRan, reportable, summarizeUsage, usageReport } from "./lib/usage.mts"
 import {
   type Credentials,
   acquireDispatch,
@@ -922,7 +923,7 @@ export default function agentOffice(pi: ExtensionAPI) {
     // path cannot claim the task and forget to say its worker ran (rodri on
     // ao-pi#4: the scratch path did exactly that, and its finished worker was
     // unclaimed to todo and re-dispatched on the next poll).
-    const startWorker = async (bin: string, args: string[], cwd: string) => {
+    const startWorker = async (bin: string, args: string[], cwd: string, extraEnv: Record<string, string> = {}) => {
       // A cancellation has to win over a dispatch already in flight (ao-pi#4,
       // #34): the task was read before the claim, and the worker can run for ten
       // minutes after it. Re-read the task while the worker runs and stop it when
@@ -943,7 +944,7 @@ export default function agentOffice(pi: ExtensionAPI) {
         },
         intervalMs: WORKER_STATUS_POLL_MS,
       })
-      const result = await run(bin, args, cwd, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile }, stop.signal).catch((err) => {
+      const result = await run(bin, args, cwd, DISPATCH_STALE_MS, { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile, ...extraEnv }, stop.signal).catch((err) => {
         warn("could not start the worker", { task: id, error: String(err) })
         return undefined
       })
@@ -956,8 +957,17 @@ export default function agentOffice(pi: ExtensionAPI) {
       const task = (detail as any)?.task ?? detail
       // The task's resolved preset (agent-office#841) decides the worker's model
       // and thinking. A task with no preset gets no flags: its worker's args stay
-      // exactly what they were. One read, used by both worker paths below.
-      const presetFlags = workerPresetFlags(task)
+      // exactly what they were. One read, used by both worker paths below, and it
+      // also says which tiers actually reached the command line, which is what the
+      // worker reports back as `preset_ran` (Office 1b8f755a): a tier the mapping
+      // does not name ran nothing, so it is not reported.
+      const preset = workerPresetArgs(task)
+      const presetFlags = preset.flags
+      // The worker reports its own run: the task it paid for, and the preset that
+      // ran. Nothing else is handed down - the counts come from Pi's own session,
+      // never from here.
+      const workerEnv: Record<string, string> = { AGENT_OFFICE_TASK_ID: id }
+      if (preset.ran) workerEnv.AGENT_OFFICE_PRESET_RAN = JSON.stringify(preset.ran)
       // The poller handed us a snapshot (ao-pi#4): between reading it and taking a
       // slot the task can be cancelled, done or claimed. stillDispatchable has
       // said so since agent-office#540 and nothing called it, so a cancelled task
@@ -1000,7 +1010,7 @@ export default function agentOffice(pi: ExtensionAPI) {
       if (target.kind === "scratch") {
         const scratch = scratchTaskDir(id)
         mkdirSync(scratch, { recursive: true })
-        const result = await startWorker(PI_BIN, ["-e", HERE, "--print", scratchPrompt(id, task, scratch), ...presetFlags], scratch)
+        const result = await startWorker(PI_BIN, ["-e", HERE, "--print", scratchPrompt(id, task, scratch), ...presetFlags], scratch, workerEnv)
         if (result === undefined) {
           if (assignedKey) seenAssigned.delete(assignedKey)
           return
@@ -1038,7 +1048,7 @@ export default function agentOffice(pi: ExtensionAPI) {
         return
       }
       const [workerBin, ...restArgs] = workerArgs ?? [PI_BIN, "-e", HERE, "--print", prompt, ...presetFlags]
-      const result = await startWorker(workerBin, restArgs, path)
+      const result = await startWorker(workerBin, restArgs, path, workerEnv)
       if (result === undefined) {
         // The worker never started: a missing binary or environment problem is
         // retryable, unlike a worker that ran and exited non-zero.
@@ -1174,6 +1184,53 @@ export default function agentOffice(pi: ExtensionAPI) {
   const pollInterval = Number.isFinite(configuredPollNumber) ? Math.max(configuredPollNumber, 1_000) : DEFAULT_POLL_MS
   const pollAllowed = () => !isChild && !onTaskBranch(directory) && !unconnected()
 
+  // --- a dispatched worker's own run (Office 1b8f755a) ---
+  // The worker is the one party that can say what its run cost: the counts are in
+  // Pi's own session, and `preset_ran` is the assignee's to report.
+  // AGENT_OFFICE_TASK_ID is set by the dispatcher and inherited by nothing else
+  // that is also a worker, so an interactive session, an inbox run and a cron run
+  // report nothing. The run is the session Pi created for it: one report per run,
+  // and a retry of that run reuses the key rather than storing a second row.
+  const reportedRuns = new Set<string>()
+  let loggedNoCounts = false
+  const reportWorkerRun = async (ctx: ExtensionContext) => {
+    const taskID = process.env.AGENT_OFFICE_TASK_ID?.trim()
+    if (!taskID) return
+    const manager = ctx.sessionManager
+    const run = manager?.getSessionId() || sessionId
+    if (!run || reportedRuns.has(run)) return
+    reportedRuns.add(run)
+    const summary = summarizeUsage(manager?.getEntries?.() ?? [])
+    if (reportable(summary)) {
+      const body = usageReport({ taskID, run, day: dayOf(manager?.getHeader?.()?.timestamp), summary })
+      // One retry: the key makes a repeat store nothing new, so a transient
+      // failure is worth a second attempt. Whatever happens, this may not change
+      // the run's outcome - the work is done and the task already says so.
+      try {
+        await call("report_usage", body)
+      } catch {
+        try {
+          await call("report_usage", body)
+        } catch (err) {
+          warn("could not report this run's token usage", { task: taskID, run, error: String(err) })
+        }
+      }
+    } else if (!loggedNoCounts) {
+      // Once: a later settle of a session with no counts has nothing new to say.
+      loggedNoCounts = true
+      warn("Pi recorded no token counts for this run; nothing reported", { task: taskID, run })
+    }
+    const ran = presetRan(process.env.AGENT_OFFICE_PRESET_RAN)
+    if (!ran) return
+    try {
+      // The tiers are handed down only when the mapping named both of them, so
+      // this is what ran, not what the task asked for.
+      await call("update_task", { task_id: taskID, preset_ran: ran })
+    } catch (err) {
+      warn("could not report the preset this run used", { task: taskID, run, error: String(err) })
+    }
+  }
+
   // --- status reporting on this session's own streaming ---
   pi.on("session_start", async (_event, ctx) => {
     lastCtx = ctx
@@ -1244,6 +1301,10 @@ export default function agentOffice(pi: ExtensionAPI) {
   pi.on("agent_settled", async (_event, ctx) => {
     lastCtx = ctx
     stopWorking()
+    // A worker posts what its own run cost, and the preset it ran with, before it
+    // exits: `agent_settled` is the last point Pi waits on, and print mode exits
+    // as soon as it returns.
+    if (isChild) await reportWorkerRun(ctx)
   })
   pi.on("session_shutdown", async () => {
     clearInterval(heartbeat)

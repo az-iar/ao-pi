@@ -9,7 +9,7 @@ import assert from "node:assert/strict"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { type TestContext, test } from "node:test"
-import { DEFAULT_PRESET_TIERS, loadPresetTiers, presetFlags, workerPresetFlags } from "../lib/presets.ts"
+import { DEFAULT_PRESET_TIERS, loadPresetTiers, presetFlags, workerPresetArgs, workerPresetFlags } from "../lib/presets.ts"
 import { ownsTempDir } from "./tmp.mts"
 
 // A config file of this test's own, so the host's real presets file cannot decide
@@ -70,4 +70,34 @@ test("a tier the mapping does not know is left out, not guessed", (t) => {
   for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
     assert.deepEqual(presetFlags({ model: name, thinking: name }, tiers), [], `${name} must not resolve`)
   }
+})
+
+test("presetArgs reports only the tiers that reached the command line", (t) => {
+  // Office 1b8f755a: the worker reports `preset_ran`, but only a tier the mapping
+  // named actually ran - the other axis got Pi's own default, so claiming the
+  // task's preset for it would be false.
+  const tiers = loadPresetTiers(config(t, { model: { strongest: "some/other-model" } }))
+  assert.deepEqual(workerPresetArgs({ preset: { model: "strong", thinking: "high" } }, tiers), {
+    flags: ["--model", DEFAULT_PRESET_TIERS.model.strong, "--thinking", "high"],
+    ran: { model: "strong", thinking: "high" },
+  })
+  // The override reaches the flags as well as the report, from the same read.
+  assert.deepEqual(workerPresetArgs({ preset: { model: "strongest", thinking: "low" } }, tiers), {
+    flags: ["--model", "some/other-model", "--thinking", "low"],
+    ran: { model: "strongest", thinking: "low" },
+  })
+  // An unmapped tier on either axis is no report at all: `preset_ran` needs both.
+  assert.equal(workerPresetArgs({ preset: { model: "turbo", thinking: "high" } }, tiers).ran, undefined)
+  assert.equal(workerPresetArgs({ preset: { model: "strong", thinking: "lo" } }, tiers).ran, undefined)
+  // A tier that resolves on Object.prototype is not a tier: nothing ran to report.
+  assert.equal(workerPresetArgs({ preset: { model: "constructor", thinking: "high" } }, tiers).ran, undefined)
+  // No preset, or a shape an older Office sends: no flags at all, and nothing to
+  // report. One axis alone still travels, but is not a preset that ran.
+  for (const task of [{}, { preset: null }, { preset: "strong" }, { preset: [] }]) {
+    assert.deepEqual(workerPresetArgs(task, tiers), { flags: [], ran: undefined }, JSON.stringify(task))
+  }
+  assert.deepEqual(workerPresetArgs({ preset: { model: "strong" } }, tiers), {
+    flags: ["--model", DEFAULT_PRESET_TIERS.model.strong],
+    ran: undefined,
+  })
 })
