@@ -427,6 +427,25 @@ function responseExcerpt(text: string, limit = 120) {
 
 type TokenBody = { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; error?: unknown; error_description?: unknown }
 
+// A token endpoint failure that kept its HTTP status. Callers need to tell two
+// kinds apart: a refusal (400/401 - the grant itself is dead, and the same
+// request would be refused again) and a transient failure (a gateway's 5xx, a
+// network error, a timeout) that another attempt can get past. The message is
+// the whole failure text, status included, so a log still says what happened.
+export class TokenRequestError extends Error {
+  readonly status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = "TokenRequestError"
+    this.status = status
+  }
+}
+
+// True when the Office refused the grant rather than failing to answer it: 400
+// or 401 from the token endpoint means the refresh token will not be accepted
+// again, so only a fresh approval (/office) can renew this session.
+export const tokenRequestRefused = (err: unknown) => err instanceof TokenRequestError && (err.status === 400 || err.status === 401)
+
 // The token endpoint's failure, with the HTTP status in front. The Office itself
 // answers errors as JSON, but a gateway in front of it answers an HTML page, and
 // the status was read after res.json() - so a 502 arrived as "SyntaxError:
@@ -452,11 +471,11 @@ export async function tokenRequest(client_id: string, form: Record<string, strin
   if (!res.ok) {
     const reported = [body.error_description, body.error].find((value): value is string => typeof value === "string" && value.trim() !== "")
     const detail = reported?.trim() || responseExcerpt(text)
-    throw new Error(`Office token request failed: HTTP ${res.status}${detail ? `: ${detail}` : ""}`)
+    throw new TokenRequestError(`Office token request failed: HTTP ${res.status}${detail ? `: ${detail}` : ""}`, res.status)
   }
   const { access_token, refresh_token, expires_in } = body
   if (typeof access_token !== "string" || typeof refresh_token !== "string" || typeof expires_in !== "number" || !Number.isFinite(expires_in)) {
-    throw new Error(`Office token request failed: HTTP ${res.status}: the response was not a token: ${responseExcerpt(text) || "(empty)"}`)
+    throw new TokenRequestError(`Office token request failed: HTTP ${res.status}: the response was not a token: ${responseExcerpt(text) || "(empty)"}`, res.status)
   }
   return { office: OFFICE, client_id, access_token, refresh_token, expires_at: Date.now() + expires_in * 1000 }
 }

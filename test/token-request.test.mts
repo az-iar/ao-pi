@@ -30,7 +30,7 @@ const server = createServer((req, res) => {
 })
 await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
 process.env.AGENT_OFFICE_URL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
-const { OFFICE, tokenRequest } = await import("../lib/office.ts")
+const { OFFICE, tokenRequest, tokenRequestRefused } = await import("../lib/office.ts")
 after(() => {
   // fetch keeps its socket alive; a close that waits for it would outlive the run.
   server.closeAllConnections()
@@ -74,6 +74,18 @@ test("a JSON token response is still parsed", async () => {
   assert.equal(credentials.refresh_token, "refresh-9")
   // expires_in is seconds, and the deadline is the point of storing it.
   assert.ok(credentials.expires_at >= before + 3_600_000, `expires_at ${credentials.expires_at - before}ms from now`)
+})
+
+test("a refused grant is told apart from a failure that passes", async () => {
+  // 400 and 401 are the Office refusing the grant: the same refresh token would
+  // be refused again, so the extension stops retrying. A 5xx is the Office (or a
+  // gateway) failing to answer and is worth another attempt.
+  replies.push({ status: 400, type: "application/json", body: JSON.stringify({ error: "invalid_grant", error_description: "expired" }) })
+  assert.equal(tokenRequestRefused(await failure(tokenRequest("client-1", { grant_type: "refresh_token", refresh_token: "refresh-6" }))), true)
+  replies.push({ status: 401, type: "application/json", body: JSON.stringify({ error: "invalid_client" }) })
+  assert.equal(tokenRequestRefused(await failure(tokenRequest("client-1", { grant_type: "refresh_token", refresh_token: "refresh-5" }))), true)
+  replies.push({ status: 503, type: "text/html", body: "<html><body><h1>503 Service Unavailable</h1></body></html>" })
+  assert.equal(tokenRequestRefused(await failure(tokenRequest("client-1", { grant_type: "refresh_token", refresh_token: "refresh-4" }))), false)
 })
 
 test("an Office JSON error still reports its own description", async () => {

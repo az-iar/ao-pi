@@ -52,21 +52,22 @@ test("a failed scheduled refresh is retried, and its success re-arms the normal 
     assert.equal(tokenCalls(), 0, "the session renewed a token that had not expired yet")
     assert.ok((await status()).mcpRefreshAt, "no refresh was scheduled for the boot token")
 
-    // From here the Office answers the token endpoint with a gateway page, once.
-    h.office.state.tokenFailures = 1
+    // From here the Office answers the token endpoint with a gateway page, twice:
+    // one failure only shows a retry, two show the backoff keeps retrying.
+    h.office.state.tokenFailures = 2
 
     // The failed attempt: the failure names the status, not a SyntaxError, and a
     // retry is scheduled instead of the schedule simply ending.
     await until(async () => Boolean((await status()).lastMcpError), "the timer's refresh to fail")
     const failed = await status()
     assert.match(failed.lastMcpError, /HTTP 502/, `the refresh failure does not name the status: ${failed.lastMcpError}`)
-    assert.equal(tokenCalls(), 1, "the timer's refresh did not reach the token endpoint")
+    assert.ok(tokenCalls() >= 1, "the timer's refresh did not reach the token endpoint")
     assert.ok(failed.mcpRefreshAt, "the failed refresh left nothing scheduled, so nothing would try again")
 
-    // The retry succeeds, and what it arms is the normal schedule again.
+    // The second retry succeeds, and what it arms is the normal schedule again.
     await until(async () => (await status()).lastMcpError === undefined, "the retry to clear the error")
     const recovered = await status()
-    assert.equal(tokenCalls(), 2, `the retry made ${tokenCalls()} token requests instead of one`)
+    assert.equal(tokenCalls(), 3, `the refresh was attempted ${tokenCalls()} times instead of 3 (two 502s, then success)`)
     assert.equal(recovered.mcpRegistered, true, "the retry did not register the MCP server again")
     const nextRefresh = new Date(recovered.mcpRefreshAt).getTime() - Date.now()
     assert.ok(nextRefresh > 60_000, `the success did not re-arm the normal schedule: next refresh in ${nextRefresh}ms`)

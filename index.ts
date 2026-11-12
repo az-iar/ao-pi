@@ -84,6 +84,7 @@ import {
   supervisorPrompt,
   taskID,
   tokenRequest,
+  tokenRequestRefused,
   workspaceKey,
   resolveDispatchRepo,
   siblingCheckouts,
@@ -498,6 +499,11 @@ export default function agentOffice(pi: ExtensionAPI) {
   // How many automatic refreshes have failed in a row: the retry waits longer
   // with each one, and a successful registration resets it.
   let mcpRetryAttempt = 0
+  // Whether the last failed refresh is worth retrying. The Office refusing the
+  // grant (400/401) is final - the same refresh token would be refused again -
+  // so the timer stops and asks for /office instead. Set by the failure, cleared
+  // by a success.
+  let mcpRetryable = true
   // session_shutdown sets this: a refresh still in flight when the session ends
   // must not arm a timer that outlives it.
   let mcpStopped = false
@@ -561,6 +567,11 @@ export default function agentOffice(pi: ExtensionAPI) {
   // What the timer runs. Only the automatic refresh retries: the manual /office
   // paths report their own failure to the user, who can act on it now.
   async function refreshMcp() {
+    // The timer that fired is spent: nothing is scheduled until this attempt
+    // arms the next one, so /office status does not claim a refresh is pending
+    // while it runs - or after a refusal has stopped the schedule for good.
+    mcpTimer = undefined
+    mcpRefreshAt = undefined
     let ok = false
     try {
       ok = await connectMcp(true)
@@ -571,6 +582,11 @@ export default function agentOffice(pi: ExtensionAPI) {
       warn("could not refresh the office MCP connection", { error: String(err) })
     }
     if (ok || mcpStopped) return
+    // A refusal is final: the same refresh token would be refused again, so
+    // retrying only keeps the session on an expired bearer. connectMcp has
+    // warned once and lastMcpError says why; no timer is armed, and /office is
+    // what renews the session now.
+    if (!mcpRetryable) return
     scheduleMcpRetry()
   }
   // True when this session may use the Office tools now: registered, already
@@ -587,7 +603,13 @@ export default function agentOffice(pi: ExtensionAPI) {
       token = await ownedBearer()
     } catch (err) {
       lastMcpError = String(err)
-      warn("could not read the Office token", { error: String(err) })
+      // A refusal is neither a race nor a bad minute: the Office will answer the
+      // same refresh token the same way, so this failure stops the retry timer
+      // and the one warning asks for the only thing that helps. A transient
+      // failure (5xx, network error, timeout) keeps the backoff instead.
+      mcpRetryable = !tokenRequestRefused(err)
+      if (mcpRetryable) warn("could not read the Office token", { error: lastMcpError })
+      else warn("the Office refused the token refresh; run /office to reconnect", { error: lastMcpError })
       return false
     }
     if (!token) return true
@@ -611,11 +633,16 @@ export default function agentOffice(pi: ExtensionAPI) {
       mcpRegistered = true
       lastMcpError = undefined
       mcpRetryAttempt = 0
+      mcpRetryable = true
       scheduleMcpRefresh()
       return true
     } catch (err) {
       lastMcpError = String(err)
-      warn("could not register the office MCP server", { error: String(err) })
+      // Registering is not the token endpoint: an old Pi build or a refused
+      // registration is not something the Office answered with a dead grant, so
+      // the retry stays on (and a previous refusal does not silence it).
+      mcpRetryable = true
+      warn("could not register the office MCP server", { error: lastMcpError })
       return false
     }
   }

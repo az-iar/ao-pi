@@ -26,6 +26,14 @@ export function fakeOffice() {
     // with an HTML 502 instead of the token: the failure shape that used to
     // surface as "SyntaxError: Unexpected token '<'" (ao-pi MCP refresh).
     tokenFailures: 0,
+    // How many upcoming token requests the Office itself refuses with a 400
+    // invalid_grant: the grant is dead, and the same request would be refused
+    // again, which is what a retry has to stop on.
+    tokenRefusals: 0,
+    // How many upcoming token requests are dropped without a reply at all: an
+    // unreachable Office, which fetch reports as a network error rather than a
+    // status, and which the retry has to keep trying through.
+    tokenDrops: 0,
     openTasks: [{ id: "task-open-1", title: "Open task" }],
     unclaimedTasks: [] as any[],
     // What get_task answers, per task id. A dispatch re-reads the task before it
@@ -73,6 +81,17 @@ export function fakeOffice() {
       return
     }
     if (url.pathname === "/oauth/token") {
+      if (state.tokenRefusals > 0) {
+        state.tokenRefusals--
+        return json(400, { error: "invalid_grant", error_description: "the refresh token is expired or revoked" })
+      }
+      if (state.tokenDrops > 0) {
+        state.tokenDrops--
+        // No status and no body: the connection dies, so the caller sees a
+        // network failure rather than an HTTP one.
+        res.socket?.destroy()
+        return
+      }
       if (state.tokenFailures > 0) {
         state.tokenFailures--
         res.writeHead(502, { "Content-Type": "text/html" })
