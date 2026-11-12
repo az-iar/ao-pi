@@ -47,7 +47,7 @@ import {
   sessionAgentOf,
   siblingCheckouts,
 } from "./lib/office.ts"
-import { workerPresetFlags } from "./lib/presets.ts"
+import { workerPresetArgs } from "./lib/presets.ts"
 
 const PI_BIN = process.env.AGENT_OFFICE_PI_BIN || "pig"
 const INBOX_TIMEOUT_MS = 60 * 60_000
@@ -119,13 +119,16 @@ function acquireRunLock(path: string): (() => void) | undefined {
 // the extension load even when it is installed with `-e` only, and the child
 // flag keeps that extension from polling, dispatching or reporting status.
 // `extra` is a worker's `--model`/`--thinking` from its task's preset; the inbox
-// path passes none, so it runs on Pi's own defaults as it always has.
-function runPi(directory: string, prompt: string, timeoutMs: number, credentialsFile: string, extra: string[] = []): { started: Promise<void>; done: Promise<number | null> } {
+// path passes none, so it runs on Pi's own defaults as it always has. `extraEnv`
+// is what the worker needs to report its own run (the task it paid for and the
+// preset that reached the command line, Office 1b8f755a); the inbox path passes
+// none, because an inbox run is not a task's cost.
+function runPi(directory: string, prompt: string, timeoutMs: number, credentialsFile: string, extra: string[] = [], extraEnv: Record<string, string> = {}): { started: Promise<void>; done: Promise<number | null> } {
   let child: ReturnType<typeof spawn>
   try {
     child = spawn(PI_BIN, ["-e", EXTENSION_DIR, "--print", prompt, ...extra], {
       cwd: directory,
-      env: { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile },
+      env: { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile, ...extraEnv },
       stdio: ["ignore", "ignore", "inherit"],
     })
   } catch (err) {
@@ -284,9 +287,12 @@ async function main(): Promise<number> {
         }
         const { path, branch } = await addWorktree(dispatchRepo, id, me.agent?.slug)
         log(`dispatching task ${id} to ${path}`)
+        const preset = workerPresetArgs(current)
+        const workerEnv: Record<string, string> = { AGENT_OFFICE_TASK_ID: id }
+        if (preset.ran) workerEnv.AGENT_OFFICE_PRESET_RAN = JSON.stringify(preset.ran)
         let job: ReturnType<typeof runPi>
         try {
-          job = runPi(path, supervisorPrompt(id, (detail as any)?.task ?? detail, path, branch), DISPATCH_STALE_MS, credentialsFile, workerPresetFlags(current))
+          job = runPi(path, supervisorPrompt(id, (detail as any)?.task ?? detail, path, branch), DISPATCH_STALE_MS, credentialsFile, preset.flags, workerEnv)
           await job.started
         } catch (err) {
           failed.add(key)
