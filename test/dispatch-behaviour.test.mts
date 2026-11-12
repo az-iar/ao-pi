@@ -19,6 +19,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { createRequire } from "node:module"
 import { basename, dirname, join } from "node:path"
 import { after, before, test } from "node:test"
+import { fileURLToPath } from "node:url"
 import { type Call, fakeOffice } from "./fake-office.mts"
 import { tempDir } from "./tmp.mts"
 
@@ -313,8 +314,7 @@ test("two copies of one issue get one worker", async () => {
   )
 })
 
-test("a worktree task whose worker runs is not unclaimed", async () => {
-  const task = { id: "task-worktree-ok", title: "Work that needs the repository", repo: FIXTURE_REPO, status: "todo" }
+test("a worktree task whose worker runs is not unclaimed", async () => {  const task = { id: "task-worktree-ok", title: "Work that needs the repository", repo: FIXTURE_REPO, status: "todo" }
   const { calls, runs: ran } = await dispatch([task])
   const updates = updateCalls(calls)
   assert.equal(withStatus(updates, "in_progress").length, 1, "claimed")
@@ -323,6 +323,53 @@ test("a worktree task whose worker runs is not unclaimed", async () => {
   assert.equal(existsSync(path), true, "the dispatch made a worktree")
   assert.equal(ran.length, 1, "one worker ran")
   assert.ok(samePath(ran[0].cwd, path), "in the worktree, not the session's checkout")
+})
+
+// agent-office#841: Office resolves a task to tiers (model fast/strong/strongest,
+// thinking low/medium/high) and the dispatcher maps them to a concrete model and
+// thinking level. The mapping is config, so these flags are written into the
+// suite's own presets file: a hard-coded value in the dispatch code would not
+// match them.
+const extensionDir = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "")
+const presetsFile = join(home, ".config", "agent-office", "presets.json")
+const setPresets = (body: unknown) => {
+  mkdirSync(dirname(presetsFile), { recursive: true })
+  writeFileSync(presetsFile, JSON.stringify(body))
+}
+const clearPresets = () => {
+  try {
+    unlinkSync(presetsFile)
+  } catch {}
+}
+
+test("a task's preset starts its worker with the configured model and thinking", async () => {
+  const task = { id: "task-preset", title: "Work with a preset", repo: "", status: "todo", preset: { model: "strongest", thinking: "high" } }
+  setPresets({ model: { strongest: "test/strongest-model" }, thinking: { high: "test-high" } })
+  const { runs: ran } = await dispatch([task]).finally(clearPresets)
+  assert.equal(ran.length, 1, "one worker ran")
+  assert.match(ran[0].argv[3], new RegExp(`^Agent Office task ${task.id}\\.`), "the prompt is still argv[3]")
+  assert.deepEqual(ran[0].argv.slice(4), ["--model", "test/strongest-model", "--thinking", "test-high"], "the task's resolved tiers, as the config maps them")
+})
+
+test("a worktree worker carries the preset through its sandboxed args", async () => {
+  const task = { id: "task-preset-worktree", title: "Preset work in the repository", repo: FIXTURE_REPO, status: "todo", preset: { model: "strong", thinking: "medium" } }
+  setPresets({ model: { strong: "test/strong-model" }, thinking: { medium: "test-medium" } })
+  const { runs: ran } = await dispatch([task]).finally(clearPresets)
+  assert.equal(ran.length, 1, "one worker ran")
+  assert.ok(samePath(ran[0].cwd, worktreePath(task.id)), "in the dispatch's worktree")
+  assert.deepEqual(ran[0].argv.slice(4), ["--model", "test/strong-model", "--thinking", "test-medium"])
+})
+
+// The fallback that matters: an older Office sends no `preset` field at all, and a
+// task without one must start exactly the worker it started before this change.
+test("a task with no preset starts its worker with exactly today's args", async () => {
+  clearPresets()
+  const task = { id: "task-no-preset", title: "Work without a preset", repo: "", status: "todo" }
+  const { runs: ran } = await dispatch([task])
+  assert.equal(ran.length, 1, "one worker ran")
+  assert.deepEqual(ran[0].argv.slice(0, 3), ["-e", extensionDir, "--print"], "the same leading args as before")
+  assert.equal(ran[0].argv.length, 4, "the prompt and nothing else")
+  assert.match(ran[0].argv[3], new RegExp(`^Agent Office task ${task.id}\\.`))
 })
 
 // #33: a cancellation has to win over a dispatch already in flight. The task is

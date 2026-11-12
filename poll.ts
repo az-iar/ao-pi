@@ -47,6 +47,7 @@ import {
   sessionAgentOf,
   siblingCheckouts,
 } from "./lib/office.ts"
+import { workerPresetFlags } from "./lib/presets.ts"
 
 const PI_BIN = process.env.AGENT_OFFICE_PI_BIN || "pig"
 const INBOX_TIMEOUT_MS = 60 * 60_000
@@ -117,10 +118,12 @@ function acquireRunLock(path: string): (() => void) | undefined {
 // never a shell string. The worker runs with its worktree as cwd. `-e` makes
 // the extension load even when it is installed with `-e` only, and the child
 // flag keeps that extension from polling, dispatching or reporting status.
-function runPi(directory: string, prompt: string, timeoutMs: number, credentialsFile: string): { started: Promise<void>; done: Promise<number | null> } {
+// `extra` is a worker's `--model`/`--thinking` from its task's preset; the inbox
+// path passes none, so it runs on Pi's own defaults as it always has.
+function runPi(directory: string, prompt: string, timeoutMs: number, credentialsFile: string, extra: string[] = []): { started: Promise<void>; done: Promise<number | null> } {
   let child: ReturnType<typeof spawn>
   try {
-    child = spawn(PI_BIN, ["-e", EXTENSION_DIR, "--print", prompt], {
+    child = spawn(PI_BIN, ["-e", EXTENSION_DIR, "--print", prompt, ...extra], {
       cwd: directory,
       env: { ...process.env, AGENT_OFFICE_CHILD: "1", AGENT_OFFICE_PI_CREDENTIALS: credentialsFile },
       stdio: ["ignore", "ignore", "inherit"],
@@ -283,7 +286,7 @@ async function main(): Promise<number> {
         log(`dispatching task ${id} to ${path}`)
         let job: ReturnType<typeof runPi>
         try {
-          job = runPi(path, supervisorPrompt(id, (detail as any)?.task ?? detail, path, branch), DISPATCH_STALE_MS, credentialsFile)
+          job = runPi(path, supervisorPrompt(id, (detail as any)?.task ?? detail, path, branch), DISPATCH_STALE_MS, credentialsFile, workerPresetFlags(current))
           await job.started
         } catch (err) {
           failed.add(key)

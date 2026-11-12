@@ -18,6 +18,7 @@
   "files": [
     "index.ts",
     "lib/office.ts",
+    "lib/presets.ts",
     "lib/token.mts",
     "poll.ts"
   ],

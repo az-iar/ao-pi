@@ -23,6 +23,8 @@
 //   AGENT_OFFICE_TOKEN              an agent API token instead of OAuth (optional)
 //   AGENT_OFFICE_PI_CREDENTIALS     exact credentials file, overrides agent-scoped storage
 //   AGENT_OFFICE_PI_BIN             the pig/pi executable for dispatch, default `pig`
+//   AGENT_OFFICE_PRESETS            the tier-to-model/thinking mapping, default
+//                                   ~/.config/agent-office/presets.json
 //   AGENT_OFFICE_CALLBACK_PORT      loopback port for the OAuth callback, default 41997
 //   AGENT_OFFICE_POLL_MS            inbox poll interval, default 60000
 //   AGENT_OFFICE_AUTODISPATCH       on (default) or off
@@ -45,6 +47,7 @@ import { basename, dirname, join, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { type SessionChoice, message as sessionMessage, pickSession } from "./lib/sessions.ts"
 import { watchTask } from "./lib/task-watch.ts"
+import { workerPresetFlags } from "./lib/presets.ts"
 import {
   type Credentials,
   acquireDispatch,
@@ -860,6 +863,10 @@ export default function agentOffice(pi: ExtensionAPI) {
     try {
       const detail = await call("get_task", { task_id: id }).catch(() => undefined)
       const task = (detail as any)?.task ?? detail
+      // The task's resolved preset (agent-office#841) decides the worker's model
+      // and thinking. A task with no preset gets no flags: its worker's args stay
+      // exactly what they were. One read, used by both worker paths below.
+      const presetFlags = workerPresetFlags(task)
       // The poller handed us a snapshot (ao-pi#4): between reading it and taking a
       // slot the task can be cancelled, done or claimed. stillDispatchable has
       // said so since agent-office#540 and nothing called it, so a cancelled task
@@ -902,7 +909,7 @@ export default function agentOffice(pi: ExtensionAPI) {
       if (target.kind === "scratch") {
         const scratch = scratchTaskDir(id)
         mkdirSync(scratch, { recursive: true })
-        const result = await startWorker(PI_BIN, ["-e", HERE, "--print", scratchPrompt(id, task, scratch)], scratch)
+        const result = await startWorker(PI_BIN, ["-e", HERE, "--print", scratchPrompt(id, task, scratch), ...presetFlags], scratch)
         if (result === undefined) {
           if (assignedKey) seenAssigned.delete(assignedKey)
           return
@@ -932,14 +939,14 @@ export default function agentOffice(pi: ExtensionAPI) {
       const prompt = supervisorPrompt(id, task, path, branch)
       let workerArgs: string[] | undefined
       try {
-        workerArgs = sandboxedWorker(SANDBOX_BIN, [PI_BIN, "-e", HERE, "--print", prompt], workerSandboxPaths(path, credentialsFile), sandboxOn)
+        workerArgs = sandboxedWorker(SANDBOX_BIN, [PI_BIN, "-e", HERE, "--print", prompt, ...presetFlags], workerSandboxPaths(path, credentialsFile), sandboxOn)
       } catch (err) {
         // Refuse the dispatch rather than run the worker unsandboxed.
         notice(`Agent Office: not dispatching task ${id}: ${String(err instanceof Error ? err.message : err)}`, "error")
         if (assignedKey) seenAssigned.delete(assignedKey)
         return
       }
-      const [workerBin, ...restArgs] = workerArgs ?? [PI_BIN, "-e", HERE, "--print", prompt]
+      const [workerBin, ...restArgs] = workerArgs ?? [PI_BIN, "-e", HERE, "--print", prompt, ...presetFlags]
       const result = await startWorker(workerBin, restArgs, path)
       if (result === undefined) {
         // The worker never started: a missing binary or environment problem is
