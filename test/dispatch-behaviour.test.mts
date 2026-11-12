@@ -314,7 +314,8 @@ test("two copies of one issue get one worker", async () => {
   )
 })
 
-test("a worktree task whose worker runs is not unclaimed", async () => {  const task = { id: "task-worktree-ok", title: "Work that needs the repository", repo: FIXTURE_REPO, status: "todo" }
+test("a worktree task whose worker runs is not unclaimed", async () => {
+  const task = { id: "task-worktree-ok", title: "Work that needs the repository", repo: FIXTURE_REPO, status: "todo" }
   const { calls, runs: ran } = await dispatch([task])
   const updates = updateCalls(calls)
   assert.equal(withStatus(updates, "in_progress").length, 1, "claimed")
