@@ -66,4 +66,8 @@ test("a tier the mapping does not know is left out, not guessed", (t) => {
   // than a model picked by guesswork. The axis that is known still travels.
   assert.deepEqual(presetFlags({ model: "turbo", thinking: "high" }, tiers), ["--thinking", "high"])
   assert.deepEqual(presetFlags({ model: "fast", thinking: "lo" }, tiers), ["--model", DEFAULT_PRESET_TIERS.model.fast])
+  // Names that resolve on Object.prototype are not tiers: no flag, no non-string argv.
+  for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+    assert.deepEqual(presetFlags({ model: name, thinking: name }, tiers), [], `${name} must not resolve`)
+  }
 })

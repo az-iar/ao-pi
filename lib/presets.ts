@@ -71,8 +71,10 @@ export function presetFlags(preset: unknown, tiers: PresetTiers = loadPresetTier
   const { model, thinking } = preset as { model?: unknown; thinking?: unknown }
   const one = (tier: unknown, map: Record<string, string>, flag: string) => {
     if (typeof tier !== "string") return
-    const concrete = map[tier.trim()]
-    if (concrete) flags.push(flag, concrete)
+    const name = tier.trim()
+    // Own keys only: `constructor` or `__proto__` in Office's text must not resolve
+    // to something off Object.prototype and become a non-string argv entry.
+    if (Object.hasOwn(map, name) && map[name]) flags.push(flag, map[name])
   }
   one(model, tiers.model, "--model")
   one(thinking, tiers.thinking, "--thinking")
