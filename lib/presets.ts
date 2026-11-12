@@ -18,9 +18,11 @@ export type PresetTiers = { model: Record<string, string>; thinking: Record<stri
 
 // The shipped mapping: the cheap model for grunt work, the mid one for an
 // ordinary fix or feature, the top one for research and design. Documented in
-// README.md ("Model and thinking presets"), and overridable per host.
+// README.md ("Model and thinking presets"), and overridable per host: these are
+// the ids available with Pi's Claude subscription provider on the reference
+// machine, and a host whose credentials name another provider maps its own.
 export const DEFAULT_PRESET_TIERS: PresetTiers = {
-  model: { fast: "anthropic/claude-haiku-4-5", strong: "anthropic/claude-sonnet-5", strongest: "anthropic/claude-opus-4-8" },
+  model: { fast: "claude-code/claude-haiku-5-5", strong: "claude-code/claude-sonnet-5-5", strongest: "claude-code/claude-opus-5-5" },
   thinking: { low: "low", medium: "medium", high: "high" },
 }
 

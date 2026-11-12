@@ -25,8 +25,8 @@ test("with no config file the shipped tiers are the mapping", (t) => {
   const tiers = loadPresetTiers(config(t))
   assert.deepEqual(tiers, DEFAULT_PRESET_TIERS)
   // The shipped values themselves: the cheap model is fast, the top one strongest.
-  assert.deepEqual(presetFlags({ model: "fast", thinking: "low" }, tiers), ["--model", "anthropic/claude-haiku-4-5", "--thinking", "low"])
-  assert.deepEqual(presetFlags({ model: "strongest", thinking: "high" }, tiers), ["--model", "anthropic/claude-opus-4-8", "--thinking", "high"])
+  assert.deepEqual(presetFlags({ model: "fast", thinking: "low" }, tiers), ["--model", "claude-code/claude-haiku-5-5", "--thinking", "low"])
+  assert.deepEqual(presetFlags({ model: "strongest", thinking: "high" }, tiers), ["--model", "claude-code/claude-opus-5-5", "--thinking", "high"])
 })
 
 test("a config file overrides one tier and leaves the rest", (t) => {
