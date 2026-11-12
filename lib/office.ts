@@ -416,6 +416,41 @@ export function credentialsFileFor(resolved: ReturnType<typeof resolveCredential
 // directory per Office agent.
 export const agentStateDir = (legacyCredentialsFile: string, kind: "notices" | "dispatch" | "poll", agent: string) => join(dirname(legacyCredentialsFile), kind, agent)
 
+// One line of a response body for a failure message. A gateway answers the token
+// endpoint with an HTML page, whose markup is noise in a log: collapse the tags
+// and the whitespace, keep the front (where the headline is) and cut it short.
+// Only the failure text is kept - never a token the caller sent.
+function responseExcerpt(text: string, limit = 120) {
+  const flat = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
+  return flat.length > limit ? `${flat.slice(0, limit)}…` : flat
+}
+
+type TokenBody = { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; error?: unknown; error_description?: unknown }
+
+// A token endpoint failure that kept its HTTP status. Callers need to tell two
+// kinds apart: a refusal (400/401 - the grant itself is dead, and the same
+// request would be refused again) and a transient failure (a gateway's 5xx, a
+// network error, a timeout) that another attempt can get past. The message is
+// the whole failure text, status included, so a log still says what happened.
+export class TokenRequestError extends Error {
+  readonly status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = "TokenRequestError"
+    this.status = status
+  }
+}
+
+// True when the Office refused the grant rather than failing to answer it: 400
+// or 401 from the token endpoint means the refresh token will not be accepted
+// again, so only a fresh approval (/office) can renew this session.
+export const tokenRequestRefused = (err: unknown) => err instanceof TokenRequestError && (err.status === 400 || err.status === 401)
+
+// The token endpoint's failure, with the HTTP status in front. The Office itself
+// answers errors as JSON, but a gateway in front of it answers an HTML page, and
+// the status was read after res.json() - so a 502 arrived as "SyntaxError:
+// Unexpected token '<'", which said nothing about the Office being unreachable
+// and made every refresh failure look like a bug in the extension.
 export async function tokenRequest(client_id: string, form: Record<string, string>): Promise<Credentials> {
   const res = await fetch(`${OFFICE}/oauth/token`, {
     method: "POST",
@@ -423,9 +458,26 @@ export async function tokenRequest(client_id: string, form: Record<string, strin
     body: new URLSearchParams({ client_id, resource: `${OFFICE}/mcp`, ...form }),
     signal: AbortSignal.timeout(15_000),
   })
-  const body = (await res.json()) as { access_token: string; refresh_token: string; expires_in: number; error?: string; error_description?: string }
-  if (!res.ok) throw new Error(`Office token request failed: ${body.error_description ?? body.error ?? res.status}`)
-  return { office: OFFICE, client_id, access_token: body.access_token, refresh_token: body.refresh_token, expires_at: Date.now() + body.expires_in * 1000 }
+  // Read once as text and parse only what is JSON: the body may be a page, and
+  // res.json() on it throws before the status has been looked at.
+  const text = await res.text()
+  let body: TokenBody = {}
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as TokenBody
+  } catch {}
+  // The Office's own error is JSON and worth quoting; a gateway's page is not, so
+  // it is cut down to a line. Neither carries the tokens the caller sent.
+  if (!res.ok) {
+    const reported = [body.error_description, body.error].find((value): value is string => typeof value === "string" && value.trim() !== "")
+    const detail = reported?.trim() || responseExcerpt(text)
+    throw new TokenRequestError(`Office token request failed: HTTP ${res.status}${detail ? `: ${detail}` : ""}`, res.status)
+  }
+  const { access_token, refresh_token, expires_in } = body
+  if (typeof access_token !== "string" || typeof refresh_token !== "string" || typeof expires_in !== "number" || !Number.isFinite(expires_in)) {
+    throw new TokenRequestError(`Office token request failed: HTTP ${res.status}: the response was not a token: ${responseExcerpt(text) || "(empty)"}`, res.status)
+  }
+  return { office: OFFICE, client_id, access_token, refresh_token, expires_at: Date.now() + expires_in * 1000 }
 }
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
