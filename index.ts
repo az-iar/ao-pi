@@ -106,6 +106,22 @@ import {
 // per worker (at most two) is cheaper than a worker that finishes unwanted work.
 const WORKER_STATUS_POLL_MS = Number(process.env.AGENT_OFFICE_WORKER_STATUS_POLL_MS ?? 60_000)
 
+// A positive number of milliseconds from the environment, or the default. A value
+// that is not one (empty, mistyped, negative) must not reach a timer: 0 or NaN
+// would arm it to fire at once and the "retry" would become a hot loop.
+const positiveEnvMs = (name: string, fallback: number) => {
+  const value = Number(process.env[name]?.trim() || NaN)
+  return Number.isFinite(value) && value > 0 ? value : fallback
+}
+// The MCP refresh timer re-registers the server before the access token expires,
+// and a failed attempt is retried with a backoff rather than leaving the session
+// on an expired bearer until someone runs /office. Both waits are settable so the
+// suite drives the timer in milliseconds instead of sleeping through production
+// timings, the same idea as AGENT_OFFICE_POLL_MS.
+const MCP_REFRESH_MIN_MS = positiveEnvMs("AGENT_OFFICE_MCP_REFRESH_MIN_MS", 10_000)
+const MCP_RETRY_BASE_MS = positiveEnvMs("AGENT_OFFICE_MCP_RETRY_MS", 60_000)
+const MCP_RETRY_MAX_MS = Math.max(MCP_RETRY_BASE_MS, 5 * 60_000)
+
 const configuredCallbackPort = Number(process.env.AGENT_OFFICE_CALLBACK_PORT ?? 41997)
 // 0 means "let the OS pick": every approval then gets its own ephemeral port,
 // which is what a test suite running files in parallel needs — a fixed base
@@ -479,6 +495,12 @@ export default function agentOffice(pi: ExtensionAPI) {
   let lastMcpError: string | undefined
   let mcpTimer: ReturnType<typeof setTimeout> | undefined
   let mcpRefreshAt: number | undefined
+  // How many automatic refreshes have failed in a row: the retry waits longer
+  // with each one, and a successful registration resets it.
+  let mcpRetryAttempt = 0
+  // session_shutdown sets this: a refresh still in flight when the session ends
+  // must not arm a timer that outlives it.
+  let mcpStopped = false
   // Pi can run as a standalone binary whose process.execPath is not a JS
   // runtime, so fall back to node or bun from PATH for the token script. The
   // result is absolute: Pi resolves the header once, and a bare name would
@@ -506,30 +528,69 @@ export default function agentOffice(pi: ExtensionAPI) {
     mcpTimer = undefined
     mcpRefreshAt = undefined
   }
+  // The one place a timer is armed, so "the next attempt is at mcpRefreshAt"
+  // stays true whether it is the normal schedule or a retry: /office status and
+  // a test both read that. Both callers clear the timer they replace first, so
+  // this never overwrites a live one.
+  function armMcpTimer(delay: number) {
+    if (mcpStopped) return
+    mcpRefreshAt = Date.now() + delay
+    mcpTimer = setTimeout(() => void refreshMcp(), delay)
+    mcpTimer.unref()
+  }
   const scheduleMcpRefresh = () => {
     clearMcpTimer()
+    if (mcpStopped) return
     if (process.env.AGENT_OFFICE_TOKEN || !auth.credentials) return
     const expiresAt = auth.credentials.expires_at
     if (!Number.isFinite(expiresAt)) return
-    const delay = Math.max(expiresAt - Date.now() - REFRESH_EARLY_MS, 10_000)
-    mcpRefreshAt = Date.now() + delay
-    mcpTimer = setTimeout(() => void connectMcp(true).catch((err) => warn("could not refresh the office MCP connection", { error: String(err) })), delay)
-    mcpTimer.unref()
+    armMcpTimer(Math.max(expiresAt - Date.now() - REFRESH_EARLY_MS, MCP_REFRESH_MIN_MS))
   }
-  const connectMcp = async (force = false) => {
-    if (mcpRegistered && !force) return
+  // A refresh that failed used to be the last one: connectMcp returned, nothing
+  // re-armed the timer, and the session kept an expired bearer until a manual
+  // /office. One transient failure at the wrong moment (a gateway's 502) was
+  // enough. Retry instead, backing off from the base to the cap, so an Office
+  // that is down for an hour is asked again every five minutes rather than never.
+  function scheduleMcpRetry() {
+    clearMcpTimer()
+    if (mcpStopped) return
+    const delay = Math.min(MCP_RETRY_BASE_MS * 2 ** mcpRetryAttempt, MCP_RETRY_MAX_MS)
+    mcpRetryAttempt += 1
+    armMcpTimer(delay)
+  }
+  // What the timer runs. Only the automatic refresh retries: the manual /office
+  // paths report their own failure to the user, who can act on it now.
+  async function refreshMcp() {
+    let ok = false
+    try {
+      ok = await connectMcp(true)
+    } catch (err) {
+      // connectMcp warns about what it could not do; this keeps the timer path
+      // from ever rejecting, which would be an unhandled rejection in a timer.
+      lastMcpError = String(err)
+      warn("could not refresh the office MCP connection", { error: String(err) })
+    }
+    if (ok || mcpStopped) return
+    scheduleMcpRetry()
+  }
+  // True when this session may use the Office tools now: registered, already
+  // registered, or - with no credentials to renew - nothing a retry could fix.
+  // False is a failed attempt (the bearer could not be renewed, or the
+  // registration was refused), which is what the timer's retry is for.
+  const connectMcp = async (force = false): Promise<boolean> => {
+    if (mcpRegistered && !force) return true
     // No office tools in an unconnected worktree: they would post, mark read
     // and update tasks as the main checkout's agent. /office here connects it.
-    if (unconnected()) return
+    if (unconnected()) return true
     let token: string | undefined
     try {
       token = await ownedBearer()
     } catch (err) {
       lastMcpError = String(err)
       warn("could not read the Office token", { error: String(err) })
-      return
+      return false
     }
-    if (!token) return
+    if (!token) return true
     try {
       if (typeof pi.registerMcpServer !== "function") throw new Error("this Pi build has no registerMcpServer; Pi 0.99 or newer is required")
       if (force && mcpRegistered) {
@@ -549,10 +610,13 @@ export default function agentOffice(pi: ExtensionAPI) {
       })
       mcpRegistered = true
       lastMcpError = undefined
+      mcpRetryAttempt = 0
       scheduleMcpRefresh()
+      return true
     } catch (err) {
       lastMcpError = String(err)
       warn("could not register the office MCP server", { error: String(err) })
+      return false
     }
   }
 
@@ -1080,6 +1144,10 @@ export default function agentOffice(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     lastCtx = ctx
     sessionId = ctx.sessionManager?.getSessionId()
+    // A session that switches conversations in this process shuts down and starts
+    // again, and session_shutdown stopped the refresh timer for the one it left:
+    // the timer belongs to whichever session is live, so it starts again here.
+    mcpStopped = false
     // A session pointer records an approval made somewhere else and names that
     // agent's token file, which in an unconnected worktree is the main
     // checkout's. Such a worktree connects only through its own marked pointer,
@@ -1148,6 +1216,7 @@ export default function agentOffice(pi: ExtensionAPI) {
     heartbeat = undefined
     clearInterval(pollTimer)
     pollTimer = undefined
+    mcpStopped = true
     clearMcpTimer()
     approval?.cancel()
     if (working) {

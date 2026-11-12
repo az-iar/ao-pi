@@ -22,6 +22,10 @@ export function fakeOffice() {
     // agent37, bridge, or undefined for a server that predates the field.
     deliveryMode: "poll" as string | undefined,
     tokens: 0,
+    // How many upcoming token requests a gateway in front of the Office answers
+    // with an HTML 502 instead of the token: the failure shape that used to
+    // surface as "SyntaxError: Unexpected token '<'" (ao-pi MCP refresh).
+    tokenFailures: 0,
     openTasks: [{ id: "task-open-1", title: "Open task" }],
     unclaimedTasks: [] as any[],
     // What get_task answers, per task id. A dispatch re-reads the task before it
@@ -69,6 +73,12 @@ export function fakeOffice() {
       return
     }
     if (url.pathname === "/oauth/token") {
+      if (state.tokenFailures > 0) {
+        state.tokenFailures--
+        res.writeHead(502, { "Content-Type": "text/html" })
+        res.end("<!doctype html><html><head><title>502 Bad Gateway</title></head><body><h1>502 Bad Gateway</h1><hr><center>nginx</center></body></html>")
+        return
+      }
       state.tokens++
       return json(200, { access_token: `access-${state.tokens}`, refresh_token: `refresh-${state.tokens}`, expires_in: 3600, token_type: "Bearer", scope: "office:read office:write office:events" })
     }
