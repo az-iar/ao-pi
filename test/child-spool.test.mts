@@ -12,11 +12,11 @@
 // network leaves the process and no token is printed. The pure range/key/body
 // rules are pinned in test/spool.test.mts.
 import assert from "node:assert/strict"
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { after, test } from "node:test"
 import { type Call, fakeOffice } from "./fake-office.mts"
-import { spoolFileName } from "../lib/spool.mts"
+import { cursorFileName, spoolFileName } from "../lib/spool.mts"
 import { tempDir } from "./tmp.mts"
 
 type Entry = { id?: string; type?: string; message?: { role?: string; model?: string; usage?: Record<string, number> }; usage?: Record<string, number> }
@@ -197,8 +197,32 @@ test("with no spool directory the child behaves exactly as before and posts its 
   }
 })
 
+test("a cursor the child cannot read is logged once, and spooling starts over", async () => {
+  // A resumed session whose cursor the spool cannot read: a symlink to itself
+  // fails whoever the process runs as, and the child has to start from the
+  // beginning of the session. That is said once, because repeating it every
+  // settle would bury the run's own output.
+  const run = "session-spool-bad-cursor"
+  mkdirSync(spool, { recursive: true })
+  symlinkSync(cursorFileName(run), join(spool, cursorFileName(run)))
+  const before = warns.filter((line) => line.includes("could not read this child's spool cursor")).length
+
+  const entries = [assistant("k1", "claude-sonnet-5-5", usage(10, 1, 0, 0))]
+  const ctx = await start(run, entries)
+  await settle(ctx)
+  assert.equal(warns.filter((line) => line.includes("could not read this child's spool cursor")).length, before + 1, "logged once")
+  assert.equal(readFileSync(join(spool, cursorFileName(run)), "utf8").trim(), "k1", "a usable cursor replaced the unreadable one")
+
+  // The next settle is back to a delta, and does not log again.
+  entries.push(assistant("k2", "claude-sonnet-5-5", usage(300, 30, 0, 0)))
+  await settle(ctx)
+  assert.equal(warns.filter((line) => line.includes("could not read this child's spool cursor")).length, before + 1, "not said twice")
+  const bodies = spoolFiles(spool).map((name) => bodyOf(join(spool, name)))
+  const last = bodies.find((body: any) => body.idempotency_key === `pi:${run}:k2`)
+  assert.deepEqual(last?.tokens, { input: 300, output: 30, cache_read: 0, cache_write: 0 }, "only what the last settle added")
+})
+
 test("a spool that cannot be written is logged and changes nothing about the run", async () => {
-  office.calls.length = 0
   // A file where the directory should be: mkdir fails every time.
   const blocked = join(root, "blocked-parent")
   writeFileSync(blocked, "not a directory")

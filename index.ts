@@ -1202,9 +1202,12 @@ export default function agentOffice(pi: ExtensionAPI) {
   // started it can, so the child leaves the counts in AGENT_OFFICE_USAGE_SPOOL and
   // the parent's ao-claude plugin posts them as itself. A long-lived child
   // settles many times and each file carries only what was recorded since the
-  // last one; the cursor is this process's memory, and a settle after a resume
-  // re-spools the whole session under the same keys rather than charging twice.
-  let spooledThrough: string | undefined
+  // last one. The cursor is held per session in this process and in the spool
+  // beside the reports, because a resumed session is a new process: with only the
+  // memory, it would start from the beginning and queue the whole history under
+  // the newest entry's key, which Office cannot tell from new spend.
+  const spooledThrough = new Map<string, string>()
+  let loggedSpoolCursorError = false
   const spoolChildUsage = (ctx: ExtensionContext, dir: string) => {
     try {
       const sessionID = ctx.sessionManager?.getSessionId() || sessionId
@@ -1213,12 +1216,19 @@ export default function agentOffice(pi: ExtensionAPI) {
       if (!sessionID) return
       const result = spoolUsage({
         entries: ctx.sessionManager?.getEntries?.() ?? [],
-        cursor: spooledThrough,
+        cursor: spooledThrough.get(sessionID),
         sessionID,
         taskID: process.env.AGENT_OFFICE_TASK_ID?.trim(),
         dir,
       })
-      spooledThrough = result.cursor
+      if (result.cursorError && !loggedSpoolCursorError) {
+        // Once: a cursor this side cannot read means spooling starts from the
+        // beginning of the session, and repeating that on every settle would bury
+        // the run's own output.
+        loggedSpoolCursorError = true
+        warn("could not read this child's spool cursor; spooling from the start of the session", { error: result.cursorError })
+      }
+      if (result.cursor) spooledThrough.set(sessionID, result.cursor)
     } catch (err) {
       // The work is done and the task already says so: a spool that fails is one
       // line in the log, never a different outcome for the run.
