@@ -30,7 +30,7 @@ export type UsageSummary = { tokens: Tokens; total: number; model: string }
 // The shapes read out of a session entry, structural so this file depends on no
 // harness's exported types.
 type Counts = { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown }
-type Entry = { type?: string; usage?: Counts; message?: { role?: string; model?: unknown; usage?: Counts } }
+export type UsageEntry = { type?: string; usage?: Counts; message?: { role?: string; model?: unknown; usage?: Counts } }
 
 const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : 0)
 
@@ -55,7 +55,7 @@ function add(tokens: Tokens, usage: Counts | undefined): number {
  * run that fell back to another model for one turn is attributed to the model
  * that did the work, deterministically (first seen wins a tie).
  */
-export function summarizeUsage(entries: readonly Entry[]): UsageSummary {
+export function summarizeUsage(entries: readonly UsageEntry[]): UsageSummary {
   const tokens: Tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   const byModel = new Map<string, number>()
   let model = ""

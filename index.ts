@@ -28,6 +28,7 @@
 //   AGENT_OFFICE_CALLBACK_PORT      loopback port for the OAuth callback, default 41997
 //   AGENT_OFFICE_POLL_MS            inbox poll interval, default 60000
 //   AGENT_OFFICE_AUTODISPATCH       on (default) or off
+//   AGENT_OFFICE_USAGE_SPOOL        a child's spool directory, for its parent to report
 //   AGENT_OFFICE_CLIENT_NAME        OAuth client name; defaults to folder@host
 //   OPTCHAT_PROFILE                 not read: set to the folder's Office agent so
 //                                   pi-optchat opens that agent's memory, unless the
@@ -49,6 +50,7 @@ import { type SessionChoice, message as sessionMessage, pickSession } from "./li
 import { watchTask } from "./lib/task-watch.ts"
 import { workerPresetArgs } from "./lib/presets.ts"
 import { dayOf, presetRan, reportable, summarizeUsage, usageReport } from "./lib/usage.mts"
+import { spoolDirFor, spoolUsage } from "./lib/spool.mts"
 import {
   type Credentials,
   acquireDispatch,
@@ -1193,6 +1195,37 @@ export default function agentOffice(pi: ExtensionAPI) {
   // and a retry of that run reuses the key rather than storing a second row.
   const reportedRuns = new Set<string>()
   let loggedNoCounts = false
+
+  // --- a child's own run, queued for its parent (Office dd185d2b) ---
+  // A child - `hc run` under a Claude Code session - has no Office identity of
+  // its own, so it cannot post its spend and does not try. The parent that
+  // started it can, so the child leaves the counts in AGENT_OFFICE_USAGE_SPOOL and
+  // the parent's ao-claude plugin posts them as itself. A long-lived child
+  // settles many times and each file carries only what was recorded since the
+  // last one; the cursor is this process's memory, and a settle after a resume
+  // re-spools the whole session under the same keys rather than charging twice.
+  let spooledThrough: string | undefined
+  const spoolChildUsage = (ctx: ExtensionContext, dir: string) => {
+    try {
+      const sessionID = ctx.sessionManager?.getSessionId() || sessionId
+      // The key names the session; without one there is nothing to attribute the
+      // files to, and the next settle names it again.
+      if (!sessionID) return
+      const result = spoolUsage({
+        entries: ctx.sessionManager?.getEntries?.() ?? [],
+        cursor: spooledThrough,
+        sessionID,
+        taskID: process.env.AGENT_OFFICE_TASK_ID?.trim(),
+        dir,
+      })
+      spooledThrough = result.cursor
+    } catch (err) {
+      // The work is done and the task already says so: a spool that fails is one
+      // line in the log, never a different outcome for the run.
+      warn("could not spool this run's token usage", { error: String(err) })
+    }
+  }
+
   const reportWorkerRun = async (ctx: ExtensionContext) => {
     const taskID = process.env.AGENT_OFFICE_TASK_ID?.trim()
     if (!taskID) return
@@ -1201,7 +1234,10 @@ export default function agentOffice(pi: ExtensionAPI) {
     if (!run || reportedRuns.has(run)) return
     reportedRuns.add(run)
     const summary = summarizeUsage(manager?.getEntries?.() ?? [])
-    if (reportable(summary)) {
+    // A child that spools never posts: what it would post, the parent does, as
+    // the agent that started it (Office dd185d2b).
+    const spools = spoolDirFor(process.env) !== undefined
+    if (!spools && reportable(summary)) {
       const body = usageReport({ taskID, run, day: dayOf(manager?.getHeader?.()?.timestamp), summary })
       // One retry: the key makes a repeat store nothing new, so a transient
       // failure is worth a second attempt. Whatever happens, this may not change
@@ -1215,7 +1251,7 @@ export default function agentOffice(pi: ExtensionAPI) {
           warn("could not report this run's token usage", { task: taskID, run, error: String(err) })
         }
       }
-    } else if (!loggedNoCounts) {
+    } else if (!spools && !loggedNoCounts) {
       // Once: a later settle of a session with no counts has nothing new to say.
       loggedNoCounts = true
       warn("Pi recorded no token counts for this run; nothing reported", { task: taskID, run })
@@ -1304,9 +1340,21 @@ export default function agentOffice(pi: ExtensionAPI) {
     // A worker posts what its own run cost, and the preset it ran with, before it
     // exits: `agent_settled` is the last point Pi waits on, and print mode exits
     // as soon as it returns.
-    if (isChild) await reportWorkerRun(ctx)
+    if (isChild) {
+      // A child queues its usage for its parent before anything else: it has no
+      // identity to post with, and reportWorkerRun leaves that post out when it
+      // spools.
+      const spoolDir = spoolDirFor(process.env)
+      if (spoolDir) spoolChildUsage(ctx, spoolDir)
+      await reportWorkerRun(ctx)
+    }
   })
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (_event, ctx) => {
+    // Best effort: whatever the last turn recorded is queued even when the
+    // session never settles (print mode exits through here).
+    const spoolCtx = ctx?.sessionManager ? ctx : lastCtx
+    const spoolDir = isChild ? spoolDirFor(process.env) : undefined
+    if (spoolDir && spoolCtx) spoolChildUsage(spoolCtx, spoolDir)
     clearInterval(heartbeat)
     heartbeat = undefined
     clearInterval(pollTimer)
